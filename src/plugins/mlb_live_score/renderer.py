@@ -340,23 +340,29 @@ class ScoreboardRenderer:
         )
         self._text_in_box(draw, venue, (x0, y0 + round(height * 0.22), x1, y0 + round(height * 0.37)), venue_font, align="left")
         starter_y = y0 + round(height * 0.45)
-        title_font = _font(self.typography.label, bold=True, pixel=True)
-        self._text_in_box(draw, "STARTING PITCHERS", (x0, starter_y, x1, starter_y + round(height * 0.14)), title_font, align="left")
         line_h = max(20, round(height * 0.20))
+        first_starter_y = starter_y + line_h
+        title_h = round(height * 0.12)
+        title_font = _font(self.typography.label, bold=True, pixel=True)
+        self._text_in_box(
+            draw, "STARTING PITCHERS",
+            (x0, first_starter_y - title_h, x1, first_starter_y),
+            title_font, align="left",
+        )
         label_w = round(width * 0.18)
         self._starter_line(
             draw, game.away_abbreviation, game.away_starting_pitcher,
             self._pitcher_record(
                 game.away_starting_pitcher_wins, game.away_starting_pitcher_losses
             ),
-            (x0, starter_y + line_h, x1, starter_y + line_h * 2), label_w,
+            (x0, first_starter_y, x1, first_starter_y + line_h), label_w,
         )
         self._starter_line(
             draw, game.home_abbreviation, game.home_starting_pitcher,
             self._pitcher_record(
                 game.home_starting_pitcher_wins, game.home_starting_pitcher_losses
             ),
-            (x0, starter_y + line_h * 2, x1, min(y1, starter_y + line_h * 3)),
+            (x0, first_starter_y + line_h, x1, min(y1, first_starter_y + line_h * 2)),
             label_w,
         )
 

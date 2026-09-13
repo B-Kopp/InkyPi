@@ -106,6 +106,7 @@ class MlbDataClient:
         self.session = session or get_http_session()
         self.now_provider = now_provider or (lambda: datetime.now().astimezone())
         self._standings_cache: dict[tuple[int, int], tuple[datetime, DivisionStandings]] = {}
+        self._team_division_cache: dict[tuple[int, int], tuple[int, str, int]] = {}
 
     def _request_json(self, path: str, params: dict[str, Any] | None = None) -> dict[str, Any]:
         try:
@@ -179,7 +180,9 @@ class MlbDataClient:
                     team_id, game.season or now.year
                 )
             except RuntimeError:
-                cached = self._cached_standings(team_id, game.season or now.year, allow_stale=True)
+                cached = self._cached_standings_for_team(
+                    team_id, game.season or now.year, allow_stale=True
+                )
                 if cached:
                     cached.is_stale = True
                     presentation.standings = cached
@@ -229,31 +232,60 @@ class MlbDataClient:
                 setattr(game, f"{side}_starting_pitcher_losses", losses)
 
     def _cached_standings(
-        self, team_id: int, season: int, allow_stale: bool = False
+        self, division_id: int, season: int, team_id: int, allow_stale: bool = False
     ) -> DivisionStandings | None:
-        cached = self._standings_cache.get((team_id, season))
+        cached = self._standings_cache.get((season, division_id))
         if not cached:
             return None
         cached_at, value = cached
         if not allow_stale and self.now_provider() - cached_at > STANDINGS_CACHE_TTL:
             return None
-        return deepcopy(value)
+        result = deepcopy(value)
+        for row in result.rows:
+            row.is_selected_team = row.abbreviation == TEAM_ABBREVIATIONS.get(team_id)
+        return result
 
-    def get_division_standings(self, team_id: int, season: int) -> DivisionStandings:
-        cached = self._cached_standings(team_id, season)
-        if cached:
+    def _cached_standings_for_team(
+        self, team_id: int, season: int, allow_stale: bool = False
+    ) -> DivisionStandings | None:
+        division = self._team_division_cache.get((team_id, season))
+        if division is None:
+            return None
+        division_id, _, _ = division
+        return self._cached_standings(division_id, season, team_id, allow_stale)
+
+    def _division_for_team(self, team_id: int, season: int) -> tuple[int, str, int]:
+        cache_key = (team_id, season)
+        cached = self._team_division_cache.get(cache_key)
+        if cached is not None:
             return cached
-        team_data = self._request_json(f"/v1/teams/{team_id}", {"hydrate": "division"})
-        team = (team_data.get("teams") or [{}])[0]
+
+        team_data = self._request_json(
+            f"/v1/teams/{team_id}", {"hydrate": "division", "season": season}
+        )
+        teams = team_data.get("teams") or []
+        team = teams[0] if teams and isinstance(teams[0], dict) else {}
         division = team.get("division") or {}
         division_id = _int_or_none(division.get("id"))
-        if division_id is None:
+        league_id = _int_or_none(_dig(team, "league", "id"))
+        if division_id is None or league_id is None:
             raise RuntimeError("MLB division information is unavailable.")
-        division_name = str(division.get("nameShort") or division.get("name") or "DIVISION")
+        division_name = str(division.get("nameShort") or division.get("name") or "").strip()
+        if not division_name:
+            raise RuntimeError("MLB division information is unavailable.")
+        result = (division_id, division_name, league_id)
+        self._team_division_cache[cache_key] = result
+        return result
+
+    def get_division_standings(self, team_id: int, season: int) -> DivisionStandings:
+        division_id, division_name, league_id = self._division_for_team(team_id, season)
+        cached = self._cached_standings(division_id, season, team_id)
+        if cached:
+            return cached
         data = self._request_json(
             "/v1/standings",
             {
-                "leagueId": _dig(team, "league", "id", default="103,104"),
+                "leagueId": league_id,
                 "divisionId": division_id,
                 "season": season,
                 "standingsTypes": "regularSeason",
@@ -261,7 +293,17 @@ class MlbDataClient:
             },
         )
         records = data.get("records") or []
-        team_records = (records[0].get("teamRecords") or []) if records else []
+        division_record = next(
+            (
+                record for record in records
+                if isinstance(record, dict)
+                and _int_or_none(_dig(record, "division", "id")) == division_id
+            ),
+            None,
+        )
+        if division_record is None:
+            raise RuntimeError("MLB standings are unavailable for the selected division.")
+        team_records = division_record.get("teamRecords") or []
         rows = []
         for record in team_records:
             record_team = record.get("team") or {}
@@ -279,7 +321,7 @@ class MlbDataClient:
         if not rows:
             raise RuntimeError("MLB standings are unavailable.")
         result = DivisionStandings(division_name.upper(), rows)
-        self._standings_cache[(team_id, season)] = (self.now_provider(), deepcopy(result))
+        self._standings_cache[(season, division_id)] = (self.now_provider(), deepcopy(result))
         return result
 
 

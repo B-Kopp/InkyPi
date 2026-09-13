@@ -126,21 +126,74 @@ def schedule_payload(*games):
     return {"dates": [{"date": game["officialDate"], "games": [game]} for game in games]}
 
 
-def team_payload():
+def team_payload(team_id=144, abbreviation="ATL", league_id=104,
+                 division_id=204, division_name="NL East"):
     return {"teams": [{
-        "id": 144, "name": "Atlanta Braves", "abbreviation": "ATL",
-        "league": {"id": 104}, "division": {"id": 204, "nameShort": "NL East"},
+        "id": team_id, "abbreviation": abbreviation,
+        "league": {"id": league_id},
+        "division": {"id": division_id, "nameShort": division_name},
     }]}
 
 
 def standings_payload():
-    return {"records": [{"teamRecords": [
+    return {"records": [{"division": {"id": 204}, "teamRecords": [
         {"team": {"id": 144, "abbreviation": "ATL"}, "wins": 88, "losses": 57, "gamesBack": "-"},
         {"team": {"id": 143, "abbreviation": "PHI"}, "wins": 84, "losses": 61, "gamesBack": "4.0"},
         {"team": {"id": 121, "abbreviation": "NYM"}, "wins": 77, "losses": 68, "gamesBack": "11.0"},
         {"team": {"id": 146, "abbreviation": "MIA"}, "wins": 65, "losses": 80, "gamesBack": "23.0"},
         {"team": {"id": 120, "abbreviation": "WSH"}, "wins": 61, "losses": 84, "gamesBack": "27.0"},
     ]}]}
+
+
+DIVISION_ROWS = {
+    200: ("AL WEST", [(133, "ATH"), (117, "HOU"), (108, "LAA"), (136, "SEA"), (140, "TEX")]),
+    201: ("AL EAST", [(110, "BAL"), (111, "BOS"), (147, "NYY"), (139, "TB"), (141, "TOR")]),
+    202: ("AL CENTRAL", [(145, "CWS"), (114, "CLE"), (116, "DET"), (118, "KC"), (142, "MIN")]),
+    203: ("NL WEST", [(109, "ARI"), (115, "COL"), (119, "LAD"), (135, "SD"), (137, "SF")]),
+    204: ("NL EAST", [(144, "ATL"), (146, "MIA"), (121, "NYM"), (143, "PHI"), (120, "WSH")]),
+    205: ("NL CENTRAL", [(112, "CHC"), (113, "CIN"), (158, "MIL"), (134, "PIT"), (138, "STL")]),
+}
+
+SELECTED_TEAM_DIVISIONS = {
+    109: ("ARI", 104, 203),
+    144: ("ATL", 104, 204),
+    112: ("CHC", 104, 205),
+    147: ("NYY", 103, 201),
+    145: ("CWS", 103, 202),
+    136: ("SEA", 103, 200),
+    143: ("PHI", 104, 204),
+}
+
+
+def all_divisions_standings_payload():
+    records = []
+    # East-first ordering reproduces the real StatsAPI response that exposed the bug.
+    for division_id in (201, 204, 202, 205, 200, 203):
+        _, teams = DIVISION_ROWS[division_id]
+        records.append({
+            "division": {"id": division_id},
+            "teamRecords": [
+                {
+                    "team": {"id": team_id, "abbreviation": abbreviation},
+                    "wins": 90 - index,
+                    "losses": 60 + index,
+                    "gamesBack": "-" if index == 0 else str(index),
+                }
+                for index, (team_id, abbreviation) in enumerate(teams)
+            ],
+        })
+    return {"records": records}
+
+
+def division_test_session():
+    teams = {
+        team_id: team_payload(
+            team_id, abbreviation, league_id, division_id,
+            DIVISION_ROWS[division_id][0].title(),
+        )
+        for team_id, (abbreviation, league_id, division_id) in SELECTED_TEAM_DIVISIONS.items()
+    }
+    return FakeSession(teams=teams, standings_data=all_divisions_standings_payload())
 
 
 def with_decision_stats(payload, decisions, winner=(14, 5), loser=(11, 8), saves=31):
@@ -193,10 +246,13 @@ class FakeResponse:
 
 
 class FakeSession:
-    def __init__(self, schedule=None, game_feed=None, fail_paths=(), people=None):
+    def __init__(self, schedule=None, game_feed=None, fail_paths=(), people=None,
+                 teams=None, standings_data=None):
         self.schedule = schedule or schedule_payload(schedule_game())
         self.game_feed = game_feed or feed()
         self.people = people or {"people": []}
+        self.teams = teams or {144: team_payload()}
+        self.standings_data = standings_data or standings_payload()
         self.fail_paths = set(fail_paths)
         self.calls = []
 
@@ -211,9 +267,10 @@ class FakeSession:
         if "/people" in url:
             return FakeResponse(self.people)
         if "/teams/" in url:
-            return FakeResponse(team_payload())
+            team_id = int(url.rsplit("/", 1)[-1])
+            return FakeResponse(self.teams[team_id])
         if "/standings" in url:
-            return FakeResponse(standings_payload())
+            return FakeResponse(self.standings_data)
         raise AssertionError(url)
 
 
@@ -426,6 +483,102 @@ def test_presentation_standings_and_games_back_values():
     assert result.standings.rows[0].games_back == "-"
     result.standings.rows[1].games_back = "1.5"
     assert result.standings.rows[1].games_back == "1.5"
+
+
+@pytest.mark.parametrize(
+    "team_id,expected_division_id,expected_heading,expected_abbreviations",
+    [
+        (109, 203, "NL WEST", ["ARI", "COL", "LAD", "SD", "SF"]),
+        (144, 204, "NL EAST", ["ATL", "MIA", "NYM", "PHI", "WSH"]),
+        (112, 205, "NL CENTRAL", ["CHC", "CIN", "MIL", "PIT", "STL"]),
+        (147, 201, "AL EAST", ["BAL", "BOS", "NYY", "TB", "TOR"]),
+        (145, 202, "AL CENTRAL", ["CWS", "CLE", "DET", "KC", "MIN"]),
+        (136, 200, "AL WEST", ["ATH", "HOU", "LAA", "SEA", "TEX"]),
+    ],
+)
+def test_selected_team_returns_its_actual_division_rows(
+    team_id, expected_division_id, expected_heading, expected_abbreviations
+):
+    session = division_test_session()
+    result = MlbDataClient(session, lambda: NOW).get_division_standings(team_id, 2026)
+
+    assert result.division_name == expected_heading
+    assert [row.abbreviation for row in result.rows] == expected_abbreviations
+    assert [row.abbreviation for row in result.rows if row.is_selected_team] == [
+        SELECTED_TEAM_DIVISIONS[team_id][0]
+    ]
+    standings_call = next(call for call in session.calls if "/standings" in call[0])
+    assert standings_call[1]["divisionId"] == expected_division_id
+    assert standings_call[1]["season"] == 2026
+
+
+@pytest.mark.parametrize(
+    "first_team,second_team,first_heading,second_heading",
+    [
+        (144, 109, "NL EAST", "NL WEST"),
+        (109, 144, "NL WEST", "NL EAST"),
+        (147, 145, "AL EAST", "AL CENTRAL"),
+        (145, 136, "AL CENTRAL", "AL WEST"),
+    ],
+)
+def test_switching_divisions_never_reuses_other_division_standings(
+    first_team, second_team, first_heading, second_heading
+):
+    session = division_test_session()
+    client = MlbDataClient(session, lambda: NOW)
+
+    first = client.get_division_standings(first_team, 2026)
+    second = client.get_division_standings(second_team, 2026)
+
+    assert first.division_name == first_heading
+    assert second.division_name == second_heading
+    assert {row.abbreviation for row in first.rows} == {
+        abbreviation for _, abbreviation in DIVISION_ROWS[SELECTED_TEAM_DIVISIONS[first_team][2]][1]
+    }
+    assert {row.abbreviation for row in second.rows} == {
+        abbreviation for _, abbreviation in DIVISION_ROWS[SELECTED_TEAM_DIVISIONS[second_team][2]][1]
+    }
+    assert sum("/standings" in call[0] for call in session.calls) == 2
+
+
+def test_repeated_requests_for_same_division_share_cache_and_reselect_team():
+    session = division_test_session()
+    client = MlbDataClient(session, lambda: NOW)
+
+    atlanta = client.get_division_standings(144, 2026)
+    philadelphia = client.get_division_standings(143, 2026)
+
+    assert sum("/standings" in call[0] for call in session.calls) == 1
+    assert [row.abbreviation for row in atlanta.rows if row.is_selected_team] == ["ATL"]
+    assert [row.abbreviation for row in philadelphia.rows if row.is_selected_team] == ["PHI"]
+
+
+@pytest.mark.parametrize("team_id", [109, 144, 112, 147, 145, 136])
+def test_division_heading_matches_every_returned_row(team_id):
+    result = MlbDataClient(
+        division_test_session(), lambda: NOW
+    ).get_division_standings(team_id, 2026)
+    division_id = SELECTED_TEAM_DIVISIONS[team_id][2]
+    expected_heading, expected_teams = DIVISION_ROWS[division_id]
+
+    assert result.division_name == expected_heading
+    assert {row.abbreviation for row in result.rows} == {
+        abbreviation for _, abbreviation in expected_teams
+    }
+
+
+def test_missing_team_division_shows_standings_unavailable_without_wrong_rows():
+    scheduled_status = status("Preview", "Scheduled", "S")
+    session = FakeSession(
+        game_feed=feed(game_status=scheduled_status),
+        teams={144: {"teams": [{"id": 144, "league": {"id": 104}}]}},
+    )
+
+    result = MlbDataClient(session, lambda: NOW).get_presentation(144)
+
+    assert result.standings is None
+    assert result.standings_unavailable
+    assert not any("/standings" in call[0] for call in session.calls)
 
 
 def test_pregame_uses_one_batched_stats_fallback_only_for_missing_record():
@@ -844,6 +997,22 @@ def test_pregame_starter_rows_render_records_immediately_after_names():
     assert away[1][0:3:2] == home[1][0:3:2]
     assert away[2].size == home[2].size
     assert not any(call[0] in {"12-6", "14-5"} for call in calls)
+
+
+def test_pregame_starter_heading_sits_directly_above_starter_rows():
+    renderer = ScoreboardRenderer()
+    calls = []
+    original = renderer._text_in_box
+
+    def record(draw, text, box, font, *args, **kwargs):
+        calls.append((str(text), box))
+        return original(draw, text, box, font, *args, **kwargs)
+
+    renderer._text_in_box = record
+    renderer.render(preview_states()["pregame_starters"], (800, 480))
+
+    heading_box = next(box for text, box in calls if text == "STARTING PITCHERS")
+    assert heading_box[3] == renderer.last_starter_rows[0][1]
 
 
 def test_pregame_missing_starter_record_keeps_name_only():
