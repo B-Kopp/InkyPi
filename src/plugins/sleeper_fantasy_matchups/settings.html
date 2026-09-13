@@ -1,0 +1,116 @@
+<div class="form-group">
+    <label for="sleeperUser" class="form-label">Sleeper User:</label>
+    <input id="sleeperUser" name="sleeperUser" class="form-input" type="text"
+           placeholder="Username or numerical user ID" required autocomplete="off">
+    <input id="resolvedUserId" name="resolvedUserId" type="hidden" value="">
+    <button id="discoverSleeperLeagues" type="button" class="button">Find current leagues</button>
+    <p id="sleeperDiscoveryStatus" role="status">No API key is required.</p>
+</div>
+
+<datalist id="sleeperLeagueOptions"></datalist>
+<div class="form-group">
+    <label class="form-label">Selected Leagues (1–4, in display order):</label>
+    {% for slot in range(1, 5) %}
+    <div class="form-group">
+        <label for="leagueId{{ slot }}">{{ slot }}{% if slot == 1 %} (required){% endif %}</label>
+        <input id="leagueId{{ slot }}" name="leagueId{{ slot }}" class="form-input"
+               type="text" inputmode="numeric" list="sleeperLeagueOptions"
+               placeholder="Choose a discovered league or enter its League ID"
+               {% if slot == 1 %}required{% endif %}>
+    </div>
+    {% endfor %}
+</div>
+
+<div class="form-group">
+    <label class="form-label">Display:</label>
+    {% for field, label in [
+        ('showProjectedFinal', 'Show projected final score'),
+        ('showWinProbability', 'Show estimated win chance'),
+        ('showRecords', 'Show season records'),
+        ('showContextRow', 'Show projected points / starters remaining')
+    ] %}
+    <div class="form-group">
+        <input type="hidden" id="{{ field }}Value" name="{{ field }}" value="true">
+        <input type="checkbox" id="{{ field }}" checked
+               onclick="document.getElementById('{{ field }}Value').value=this.checked ? 'true' : 'false';">
+        <label for="{{ field }}">{{ label }}</label>
+    </div>
+    {% endfor %}
+</div>
+
+<p>Recommended refresh interval: 2–5 minutes during active NFL games.</p>
+
+<script>
+document.addEventListener('DOMContentLoaded', () => {
+    const userInput = document.getElementById('sleeperUser');
+    const resolvedInput = document.getElementById('resolvedUserId');
+    const status = document.getElementById('sleeperDiscoveryStatus');
+    const options = document.getElementById('sleeperLeagueOptions');
+    const slots = [1, 2, 3, 4].map(i => document.getElementById(`leagueId${i}`));
+
+    const setToggle = (name, fallback=true) => {
+        const raw = pluginSettings[name];
+        const enabled = raw === undefined ? fallback : String(raw) === 'true';
+        document.getElementById(name).checked = enabled;
+        document.getElementById(`${name}Value`).value = enabled ? 'true' : 'false';
+    };
+
+    if (loadPluginSettings) {
+        userInput.value = pluginSettings.sleeperUser || pluginSettings.resolvedUserId || '';
+        resolvedInput.value = pluginSettings.resolvedUserId || '';
+        slots.forEach((input, index) => input.value = pluginSettings[`leagueId${index + 1}`] || '');
+    }
+    ['showProjectedFinal', 'showWinProbability', 'showRecords', 'showContextRow']
+        .forEach(name => setToggle(name));
+
+    userInput.addEventListener('input', () => { resolvedInput.value = ''; });
+
+    document.getElementById('discoverSleeperLeagues').addEventListener('click', async () => {
+        const reference = userInput.value.trim();
+        if (!reference) {
+            status.textContent = 'Enter a Sleeper username or user ID first.';
+            return;
+        }
+        status.textContent = 'Looking up Sleeper leagues…';
+        try {
+            const userResponse = await fetch(`https://api.sleeper.app/v1/user/${encodeURIComponent(reference)}`);
+            if (!userResponse.ok) throw new Error('Sleeper user was not found.');
+            const user = await userResponse.json();
+            if (!user || !user.user_id) throw new Error('Sleeper user was not found.');
+            const stateResponse = await fetch('https://api.sleeper.app/v1/state/nfl');
+            if (!stateResponse.ok) throw new Error('NFL season information is unavailable.');
+            const state = await stateResponse.json();
+            const season = state.league_season || state.season;
+            const leaguesResponse = await fetch(
+                `https://api.sleeper.app/v1/user/${encodeURIComponent(user.user_id)}/leagues/nfl/${encodeURIComponent(season)}`
+            );
+            if (!leaguesResponse.ok) throw new Error('Sleeper leagues are unavailable.');
+            const leagues = await leaguesResponse.json();
+            options.replaceChildren();
+            leagues.sort((a, b) => String(a.name).localeCompare(String(b.name))).forEach(league => {
+                const option = document.createElement('option');
+                option.value = String(league.league_id);
+                option.label = String(league.name || league.league_id);
+                options.appendChild(option);
+            });
+            resolvedInput.value = String(user.user_id);
+            status.textContent = leagues.length
+                ? `Found ${leagues.length} ${season} NFL league(s). Choose up to four by name.`
+                : `No ${season} NFL leagues were found for this user.`;
+        } catch (error) {
+            resolvedInput.value = '';
+            status.textContent = `${error.message} You may enter League IDs manually.`;
+        }
+    });
+
+    const form = userInput.closest('form');
+    if (form) form.addEventListener('submit', event => {
+        const values = slots.map(input => input.value.trim()).filter(Boolean);
+        if (values.length < 1 || values.length > 4 || new Set(values).size !== values.length) {
+            event.preventDefault();
+            status.textContent = 'Select 1–4 different leagues.';
+        }
+    });
+});
+</script>
+
