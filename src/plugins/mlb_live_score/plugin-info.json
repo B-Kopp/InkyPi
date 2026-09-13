@@ -1,0 +1,6 @@
+{
+  "display_name": "MLB Live Score",
+  "id": "mlb_live_score",
+  "class": "MlbLiveScore",
+  "repository": "https://github.com/YOUR_USERNAME/InkyPi-MLB-Live-Score"
+}
