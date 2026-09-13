@@ -17,6 +17,7 @@ BLACK = "#101813"
 YELLOW = "#f3c640"
 RED = "#b23a32"
 LEFT_PANEL_RATIO = 0.60
+STANDINGS_COLUMN_PROPORTIONS = (0.40, 0.20, 0.20, 0.20)
 
 FONT_DIR = Path(__file__).resolve().parents[2] / "static" / "fonts"
 REGULAR_FONT = FONT_DIR / "Jost.ttf"
@@ -156,6 +157,9 @@ class ScoreboardRenderer:
         self.last_scoreboard_columns: tuple[int, int, int, int, int] | None = None
         self.last_diamond_bounds: tuple[int, int, int, int] | None = None
         self.last_final_rows: list[tuple[int, int, int, int]] = []
+        self.last_starter_rows: list[tuple[int, int, int, int]] = []
+        self.last_standings_columns: tuple[int, int, int, int, int] | None = None
+        self.last_standings_rows: list[tuple[int, int, int, int]] = []
 
     def render(
         self,
@@ -172,6 +176,9 @@ class ScoreboardRenderer:
         self.last_scoreboard_columns = None
         self.last_diamond_bounds = None
         self.last_final_rows = []
+        self.last_starter_rows = []
+        self.last_standings_columns = None
+        self.last_standings_rows = []
         margin = metrics.outer_margin
         left = (margin, margin, metrics.divider_x - metrics.panel_gap, height - margin)
         right = (metrics.divider_x + metrics.panel_gap, margin, width - margin, height - margin)
@@ -337,8 +344,21 @@ class ScoreboardRenderer:
         self._text_in_box(draw, "STARTING PITCHERS", (x0, starter_y, x1, starter_y + round(height * 0.14)), title_font, align="left")
         line_h = max(20, round(height * 0.20))
         label_w = round(width * 0.18)
-        self._labeled_line(draw, game.away_abbreviation, game.away_starting_pitcher, x0, starter_y + line_h, x1, line_h, label_w)
-        self._labeled_line(draw, game.home_abbreviation, game.home_starting_pitcher, x0, starter_y + line_h * 2, x1, line_h, label_w)
+        self._starter_line(
+            draw, game.away_abbreviation, game.away_starting_pitcher,
+            self._pitcher_record(
+                game.away_starting_pitcher_wins, game.away_starting_pitcher_losses
+            ),
+            (x0, starter_y + line_h, x1, starter_y + line_h * 2), label_w,
+        )
+        self._starter_line(
+            draw, game.home_abbreviation, game.home_starting_pitcher,
+            self._pitcher_record(
+                game.home_starting_pitcher_wins, game.home_starting_pitcher_losses
+            ),
+            (x0, starter_y + line_h * 2, x1, min(y1, starter_y + line_h * 3)),
+            label_w,
+        )
 
     def _draw_final_details(self, draw, box, game):
         x0, y0, x1, y1 = box
@@ -447,8 +467,20 @@ class ScoreboardRenderer:
         line_h = max(20, round(height * 0.10))
         starters_y = when_y + round(height * 0.12)
         label_w = round(width * 0.18)
-        self._labeled_line(draw, f"{game.away_abbreviation}:", game.away_starting_pitcher, x0, starters_y, x1, line_h, label_w)
-        self._labeled_line(draw, f"{game.home_abbreviation}:", game.home_starting_pitcher, x0, starters_y + line_h, x1, line_h, label_w)
+        self._starter_line(
+            draw, f"{game.away_abbreviation}:", game.away_starting_pitcher,
+            self._pitcher_record(
+                game.away_starting_pitcher_wins, game.away_starting_pitcher_losses
+            ),
+            (x0, starters_y, x1, starters_y + line_h), label_w,
+        )
+        self._starter_line(
+            draw, f"{game.home_abbreviation}:", game.home_starting_pitcher,
+            self._pitcher_record(
+                game.home_starting_pitcher_wins, game.home_starting_pitcher_losses
+            ),
+            (x0, starters_y + line_h, x1, starters_y + line_h * 2), label_w,
+        )
         return details
 
     def _draw_diamond(self, draw, panel, game):
@@ -511,13 +543,8 @@ class ScoreboardRenderer:
         row_top = header_top + header_h + round(height * 0.02)
         footer_h = round(height * 0.05) if standings.is_stale else 0
         row_h = max(24, (y1 - row_top - footer_h) // max(5, len(standings.rows)))
-        boundaries = [
-            x0,
-            x0 + round(width * 0.46),
-            x0 + round(width * 0.64),
-            x0 + round(width * 0.82),
-            x1,
-        ]
+        boundaries = self._standings_column_boundaries(panel)
+        self.last_standings_columns = tuple(boundaries)
         cells = [(boundaries[i], header_top, boundaries[i + 1], header_top + header_h) for i in range(4)]
         header_font = _font(self.typography.standings_header, bold=True, pixel=True)
         for label, cell in zip(("TEAM", "W", "L", "GB"), cells):
@@ -530,6 +557,7 @@ class ScoreboardRenderer:
         for index, row in enumerate(standings.rows):
             top = row_top + index * row_h
             bottom = min(y1 - footer_h, top + row_h)
+            self.last_standings_rows.append((x0, top, x1, bottom))
             if row.is_selected_team:
                 draw.rectangle((x0, top + 3, x1, bottom - 3), fill=CREAM, outline=BLACK, width=2)
                 fill = DARK_GREEN
@@ -549,6 +577,48 @@ class ScoreboardRenderer:
         if standings.is_stale:
             stale_font = _font(self.typography.micro, bold=True)
             self._text_in_box(draw, "CACHED", (x0, y1 - footer_h, x1, y1), stale_font, align="right", fill=YELLOW)
+
+    @staticmethod
+    def _standings_column_boundaries(panel):
+        x0, _, x1, _ = panel
+        width = x1 - x0
+        boundaries = [x0]
+        consumed = 0.0
+        for proportion in STANDINGS_COLUMN_PROPORTIONS[:-1]:
+            consumed += proportion
+            boundaries.append(x0 + round(width * consumed))
+        boundaries.append(x1)
+        return boundaries
+
+    def _starter_line(self, draw, label, name, record, box, label_w):
+        """Render a starter with its optional record immediately after its name."""
+        x0, y0, x1, y1 = box
+        label_end = x0 + label_w
+        label_font = _font(self.typography.label, bold=True, pixel=True)
+        self._text_in_box(
+            draw, str(label), (x0, y0, label_end, y1), label_font, align="left"
+        )
+        player_name = compact_player_name(name)
+        suffix = f" ({record})" if record and player_name != "TBD" else ""
+        available_width = x1 - label_end - 8
+        min_size = max(10, self.typography.player_primary - 7)
+        fitted_text, player_font = fit_text(
+            draw, player_name + suffix, available_width,
+            self.typography.player_primary, min_size=min_size, bold=True,
+        )
+        if suffix and not fitted_text.endswith(suffix):
+            player_font = _font(min_size, bold=True)
+            shortened_name = player_name
+            while shortened_name and _text_width(
+                draw, shortened_name.rstrip() + "…" + suffix, player_font
+            ) > available_width:
+                shortened_name = shortened_name[:-1]
+            fitted_text = shortened_name.rstrip() + "…" + suffix
+        self._text_in_box(
+            draw, fitted_text, (label_end, y0, x1, y1),
+            player_font, align="left", padding=6,
+        )
+        self.last_starter_rows.append(box)
 
     def _labeled_line(self, draw, label, value, x0, y, x1, line_h, label_w, value_fill=CREAM):
         label_font = _font(self.typography.label, bold=True, pixel=True)

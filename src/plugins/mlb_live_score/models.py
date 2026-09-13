@@ -100,7 +100,11 @@ class GameSummary:
     official_date: str | None = None
     venue: str | None = None
     away_starting_pitcher: str | None = None
+    away_starting_pitcher_wins: int | None = None
+    away_starting_pitcher_losses: int | None = None
     home_starting_pitcher: str | None = None
+    home_starting_pitcher_wins: int | None = None
+    home_starting_pitcher_losses: int | None = None
     winning_pitcher: str | None = None
     winning_pitcher_wins: int | None = None
     winning_pitcher_losses: int | None = None

@@ -158,6 +158,8 @@ class MlbDataClient:
             raise RuntimeError("MLB returned a game without an identifier.")
         feed = self._request_json(f"/v1.1/game/{game_pk}/feed/live")
         game = normalize_game(feed, selected)
+        if game.is_pregame:
+            self._fill_missing_starter_records(game, feed, selected)
 
         selected_side = "away" if game.away_team_id == team_id else "home"
         selected_team = _dig(feed, "gameData", "teams", selected_side, default={})
@@ -184,6 +186,47 @@ class MlbDataClient:
                 else:
                     presentation.standings_unavailable = True
         return presentation
+
+    def _fill_missing_starter_records(
+        self, game: GameSummary, feed: dict[str, Any], schedule: dict[str, Any]
+    ) -> None:
+        """Use one batched player request when current game payloads lack a record."""
+        missing: dict[int, str] = {}
+        for side in ("away", "home"):
+            name = getattr(game, f"{side}_starting_pitcher")
+            wins = getattr(game, f"{side}_starting_pitcher_wins")
+            losses = getattr(game, f"{side}_starting_pitcher_losses")
+            pitcher = _probable_pitcher(feed, schedule, side)
+            pitcher_id = _int_or_none(pitcher.get("id"))
+            if name and (wins is None or losses is None) and pitcher_id is not None:
+                missing[pitcher_id] = side
+        if not missing:
+            return
+
+        try:
+            data = self._request_json(
+                "/v1/people",
+                {
+                    "personIds": ",".join(str(player_id) for player_id in missing),
+                    "hydrate": (
+                        "stats(group=[pitching],type=[season],"
+                        f"season={game.season or self.now_provider().year})"
+                    ),
+                },
+            )
+        except RuntimeError:
+            return
+
+        for person in data.get("people", []) or []:
+            side = missing.get(_int_or_none(person.get("id")))
+            if side is None:
+                continue
+            pitching = _season_pitching_stats(person)
+            wins = _int_or_none(pitching.get("wins"))
+            losses = _int_or_none(pitching.get("losses"))
+            if wins is not None and losses is not None:
+                setattr(game, f"{side}_starting_pitcher_wins", wins)
+                setattr(game, f"{side}_starting_pitcher_losses", losses)
 
     def _cached_standings(
         self, team_id: int, season: int, allow_stale: bool = False
@@ -264,10 +307,67 @@ def _team_values(feed: dict[str, Any], schedule: dict[str, Any], side: str) -> t
     errors = _int_or_none(box_stats.get("errors"))
     if errors is None:
         errors = _int_or_none(line.get("errors"))
-    probable = _dig(feed, "gameData", "probablePitchers", side, "fullName")
-    if not probable:
-        probable = _dig(schedule, "teams", side, "probablePitcher", "fullName")
-    return team_id, name, abbreviation, runs, hits, errors, probable
+    probable = _probable_pitcher(feed, schedule, side)
+    probable_stats = _pitching_stats_for_player(feed.get("liveData") or {}, probable)
+    if not probable_stats:
+        probable_stats = _season_pitching_stats(probable)
+    return (
+        team_id, name, abbreviation, runs, hits, errors,
+        probable.get("fullName"),
+        _int_or_none(probable_stats.get("wins")),
+        _int_or_none(probable_stats.get("losses")),
+    )
+
+
+def _probable_pitcher(
+    feed: dict[str, Any], schedule: dict[str, Any], side: str
+) -> dict[str, Any]:
+    scheduled = _dig(schedule, "teams", side, "probablePitcher", default={})
+    live = _dig(feed, "gameData", "probablePitchers", side, default={})
+    scheduled = scheduled if isinstance(scheduled, dict) else {}
+    live = live if isinstance(live, dict) else {}
+    return {**scheduled, **live}
+
+
+def _season_pitching_stats(player: dict[str, Any] | None) -> dict[str, Any]:
+    """Read an official season pitching line from a hydrated MLB person."""
+    player = player or {}
+    season_stats = _dig(player, "seasonStats", "pitching", default={})
+    if season_stats:
+        return season_stats
+    for stat_group in player.get("stats", []) or []:
+        if _dig(stat_group, "group", "displayName") != "pitching":
+            continue
+        for split in stat_group.get("splits", []) or []:
+            stat = split.get("stat") or {}
+            if stat:
+                return stat
+    return {}
+
+
+def _pitching_stats_for_player(
+    live_data: dict[str, Any], player: dict[str, Any] | None
+) -> dict[str, Any]:
+    """Return a player's official season line from the current boxscore."""
+    player = player or {}
+    player_id = _int_or_none(player.get("id"))
+    player_name = str(player.get("fullName") or "")
+    boxscore_teams = _dig(live_data, "boxscore", "teams", default={})
+    for side in ("away", "home"):
+        players = _dig(boxscore_teams, side, "players", default={})
+        candidates = []
+        if player_id is not None:
+            candidates.append(players.get(f"ID{player_id}") or {})
+        if not candidates or not candidates[0]:
+            candidates.extend(
+                value for value in players.values()
+                if player_name and _dig(value, "person", "fullName") == player_name
+            )
+        for candidate in candidates:
+            pitching = _season_pitching_stats(candidate)
+            if pitching:
+                return pitching
+    return {}
 
 
 def _decision_pitching_stats(
@@ -277,14 +377,7 @@ def _decision_pitching_stats(
     pitcher_id = _int_or_none((decision or {}).get("id"))
     if pitcher_id is None:
         return {}
-    player_key = f"ID{pitcher_id}"
-    boxscore_teams = _dig(live_data, "boxscore", "teams", default={})
-    for side in ("away", "home"):
-        player = _dig(boxscore_teams, side, "players", player_key, default={})
-        pitching = _dig(player, "seasonStats", "pitching", default={})
-        if pitching:
-            return pitching
-    return {}
+    return _pitching_stats_for_player(live_data, decision)
 
 
 def normalize_game(feed: dict[str, Any], schedule: dict[str, Any] | None = None) -> GameSummary:
@@ -324,9 +417,11 @@ def normalize_game(feed: dict[str, Any], schedule: dict[str, Any] | None = None)
         away_team_id=away[0], away_team_name=away[1], away_abbreviation=away[2],
         away_runs=away[3], away_hits=away[4], away_errors=away[5],
         away_starting_pitcher=away[6],
+        away_starting_pitcher_wins=away[7], away_starting_pitcher_losses=away[8],
         home_team_id=home[0], home_team_name=home[1], home_abbreviation=home[2],
         home_runs=home[3], home_hits=home[4], home_errors=home[5],
         home_starting_pitcher=home[6],
+        home_starting_pitcher_wins=home[7], home_starting_pitcher_losses=home[8],
         inning=_int_or_none(linescore.get("currentInning")),
         inning_half=str(inning_half).upper() if inning_half else None,
         outs=_int_or_none(linescore.get("outs") if linescore.get("outs") is not None else count.get("outs")),

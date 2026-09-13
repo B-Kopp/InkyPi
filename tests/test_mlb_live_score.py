@@ -26,6 +26,7 @@ from plugins.mlb_live_score.renderer import (
     DARK_GREEN,
     GREEN,
     LEFT_PANEL_RATIO,
+    STANDINGS_COLUMN_PROPORTIONS,
     RenderMetrics,
     ScoreboardRenderer,
     TypographyScale,
@@ -158,6 +159,24 @@ def with_decision_stats(payload, decisions, winner=(14, 5), loser=(11, 8), saves
     return payload
 
 
+def with_starter_stats(
+    payload, away=(543037, "Gerrit Cole", 12, 6),
+    home=(675911, "Spencer Strider", 14, 5),
+):
+    for side, values in (("away", away), ("home", home)):
+        player_id, name, wins, losses = values
+        probable = {"id": player_id, "fullName": name}
+        payload["gameData"]["probablePitchers"][side] = probable
+        if wins is not None and losses is not None:
+            payload["liveData"]["boxscore"]["teams"][side]["players"] = {
+                f"ID{player_id}": {
+                    "person": probable,
+                    "seasonStats": {"pitching": {"wins": wins, "losses": losses}},
+                }
+            }
+    return payload
+
+
 class FakeResponse:
     def __init__(self, payload=None, error=None):
         self.payload = payload
@@ -174,9 +193,10 @@ class FakeResponse:
 
 
 class FakeSession:
-    def __init__(self, schedule=None, game_feed=None, fail_paths=()):
+    def __init__(self, schedule=None, game_feed=None, fail_paths=(), people=None):
         self.schedule = schedule or schedule_payload(schedule_game())
         self.game_feed = game_feed or feed()
+        self.people = people or {"people": []}
         self.fail_paths = set(fail_paths)
         self.calls = []
 
@@ -188,6 +208,8 @@ class FakeSession:
             return FakeResponse(self.schedule)
         if "/feed/live" in url:
             return FakeResponse(self.game_feed)
+        if "/people" in url:
+            return FakeResponse(self.people)
         if "/teams/" in url:
             return FakeResponse(team_payload())
         if "/standings" in url:
@@ -307,6 +329,49 @@ def test_missing_decision_season_stats_remain_optional():
     assert game.save_pitcher_saves is None
 
 
+def test_pregame_both_starters_use_boxscore_season_records():
+    scheduled = status("Preview", "Scheduled", "S")
+    game = normalize_game(
+        with_starter_stats(feed(game_status=scheduled)),
+        schedule_game(game_status=scheduled),
+    )
+    assert (game.away_starting_pitcher, game.away_starting_pitcher_wins,
+            game.away_starting_pitcher_losses) == ("Gerrit Cole", 12, 6)
+    assert (game.home_starting_pitcher, game.home_starting_pitcher_wins,
+            game.home_starting_pitcher_losses) == ("Spencer Strider", 14, 5)
+
+
+def test_pregame_one_starter_record_missing_remains_optional():
+    scheduled = status("Preview", "Scheduled", "S")
+    game = normalize_game(
+        with_starter_stats(
+            feed(game_status=scheduled),
+            home=(675911, "Spencer Strider", None, None),
+        ),
+        schedule_game(game_status=scheduled),
+    )
+    assert (game.away_starting_pitcher_wins,
+            game.away_starting_pitcher_losses) == (12, 6)
+    assert game.home_starting_pitcher == "Spencer Strider"
+    assert game.home_starting_pitcher_wins is None
+    assert game.home_starting_pitcher_losses is None
+
+
+def test_pregame_starter_tbd_preserves_empty_record():
+    scheduled = status("Preview", "Scheduled", "S")
+    game = normalize_game(
+        feed(game_status=scheduled, probable=(None, "Spencer Strider")),
+        {**schedule_game(game_status=scheduled), "teams": {
+            "away": {"team": {"id": 147, "abbreviation": "NYY"}},
+            "home": {"team": {"id": 144, "abbreviation": "ATL"},
+                     "probablePitcher": {"fullName": "Spencer Strider"}},
+        }},
+    )
+    assert game.away_starting_pitcher is None
+    assert game.away_starting_pitcher_wins is None
+    assert game.away_starting_pitcher_losses is None
+
+
 def test_missing_optional_live_fields_and_stats_do_not_crash():
     scheduled = schedule_game()
     scheduled["teams"]["away"].pop("score")
@@ -361,6 +426,41 @@ def test_presentation_standings_and_games_back_values():
     assert result.standings.rows[0].games_back == "-"
     result.standings.rows[1].games_back = "1.5"
     assert result.standings.rows[1].games_back == "1.5"
+
+
+def test_pregame_uses_one_batched_stats_fallback_only_for_missing_record():
+    scheduled = status("Preview", "Scheduled", "S")
+    game_feed = with_starter_stats(
+        feed(game_status=scheduled),
+        home=(675911, "Spencer Strider", None, None),
+    )
+    session = FakeSession(
+        game_feed=game_feed,
+        people={"people": [{
+            "id": 675911,
+            "stats": [{
+                "group": {"displayName": "pitching"},
+                "splits": [{"stat": {"wins": 14, "losses": 5}}],
+            }],
+        }]},
+    )
+    result = MlbDataClient(session, lambda: NOW).get_presentation(144)
+    people_calls = [call for call in session.calls if "/people" in call[0]]
+    assert len(people_calls) == 1
+    assert people_calls[0][1]["personIds"] == "675911"
+    assert (result.game.away_starting_pitcher_wins,
+            result.game.away_starting_pitcher_losses) == (12, 6)
+    assert (result.game.home_starting_pitcher_wins,
+            result.game.home_starting_pitcher_losses) == (14, 5)
+
+
+def test_pregame_current_boxscore_records_need_no_player_stats_request():
+    scheduled = status("Preview", "Scheduled", "S")
+    session = FakeSession(game_feed=with_starter_stats(feed(game_status=scheduled)))
+    result = MlbDataClient(session, lambda: NOW).get_presentation(144)
+    assert not any("/people" in call[0] for call in session.calls)
+    assert result.game.away_starting_pitcher_wins == 12
+    assert result.game.home_starting_pitcher_wins == 14
 
 
 def test_standings_failure_does_not_discard_game():
@@ -446,6 +546,73 @@ def test_all_six_division_names_and_five_teams_fit(division):
     renderer = ScoreboardRenderer()
     image = renderer.render(fixture, (800, 480))
     assert image.size == (800, 480)
+
+
+def test_standings_headers_and_rows_share_refined_column_boundaries():
+    fixture = presentation(base_game(
+        state=GameState.PREGAME, uses_live_layout=False, is_pregame=True
+    ))
+    renderer = ScoreboardRenderer()
+    calls = []
+    original = renderer._text_in_box
+
+    def record(draw, text, box, font, *args, **kwargs):
+        calls.append((str(text), box, kwargs.get("align", "center")))
+        return original(draw, text, box, font, *args, **kwargs)
+
+    renderer._text_in_box = record
+    renderer.render(fixture, (800, 480))
+    boundaries = renderer.last_standings_columns
+    assert STANDINGS_COLUMN_PROPORTIONS == (0.40, 0.20, 0.20, 0.20)
+    assert boundaries == tuple(renderer._standings_column_boundaries(
+        (boundaries[0], 0, boundaries[-1], 1)
+    ))
+
+    right_x = renderer.last_layout.right_panel[0]
+    header_cells = [box for text, box, _ in calls
+                    if text in {"TEAM", "W", "L", "GB"} and box[0] > right_x]
+    first_row_cells = [box for text, box, _ in calls
+                       if text in {"ATL", "88", "57", "-"} and box[0] > right_x]
+    expected_x_cells = list(zip(boundaries, boundaries[1:]))
+    assert [(box[0], box[2]) for box in header_cells] == expected_x_cells
+    assert [(box[0], box[2]) for box in first_row_cells] == expected_x_cells
+
+
+def test_all_five_standings_rows_stay_inside_panel_without_clipping():
+    renderer = ScoreboardRenderer()
+    renderer.render(preview_states()["pregame_starters"], (800, 480))
+    content_bottom = renderer.last_layout.right_panel[3] - RenderMetrics.for_canvas(
+        800, 480
+    ).panel_padding
+    assert len(renderer.last_standings_rows) == 5
+    assert all(top < bottom <= content_bottom
+               for _, top, _, bottom in renderer.last_standings_rows)
+
+
+def test_standings_multi_digit_and_decimal_values_fit_numeric_cells():
+    fixture = presentation(base_game(
+        state=GameState.PREGAME, uses_live_layout=False, is_pregame=True
+    ))
+    fixture.standings.rows = [
+        DivisionStandingRow("ATL", 100 + index, 90 + index, "-" if index == 0 else f"{index * 10}.5", index == 0)
+        for index in range(5)
+    ]
+    renderer = ScoreboardRenderer()
+    calls = []
+    original = renderer._text_in_box
+
+    def record(draw, text, box, font, *args, **kwargs):
+        if box[0] > 480 and str(text) not in {"NL EAST", "TEAM", "W", "L", "GB"}:
+            calls.append((str(text), box, font))
+        return original(draw, text, box, font, *args, **kwargs)
+
+    renderer._text_in_box = record
+    renderer.render(fixture, (800, 480))
+    draw = ImageDraw.Draw(Image.new("RGB", (1, 1)))
+    numeric = [(text, box, font) for text, box, font in calls if text != "ATL"]
+    assert len(numeric) == 15
+    assert all(draw.textlength(text, font=font) <= box[2] - box[0] - 8
+               for text, box, font in numeric)
 
 
 def test_selected_team_highlight_uses_inverse_fill():
@@ -659,6 +826,81 @@ def test_long_final_pitcher_name_cannot_overlap_record_column():
     assert ImageDraw.Draw(Image.new("RGB", (1, 1))).textlength(
         name_call[0], font=name_call[2]
     ) <= name_call[1][2] - name_call[1][0] - 4
+
+
+def test_pregame_starter_rows_render_records_immediately_after_names():
+    renderer = ScoreboardRenderer()
+    calls = []
+    original = renderer._text_in_box
+
+    def record(draw, text, box, font, *args, **kwargs):
+        calls.append((str(text), box, font))
+        return original(draw, text, box, font, *args, **kwargs)
+
+    renderer._text_in_box = record
+    renderer.render(preview_states()["pregame_starters"], (800, 480))
+    away = next(call for call in calls if call[0] == "G. COLE (12-6)")
+    home = next(call for call in calls if call[0] == "S. STRIDER (14-5)")
+    assert away[1][0:3:2] == home[1][0:3:2]
+    assert away[2].size == home[2].size
+    assert not any(call[0] in {"12-6", "14-5"} for call in calls)
+
+
+def test_pregame_missing_starter_record_keeps_name_only():
+    fixture = preview_states()["pregame_starters"]
+    fixture.game.home_starting_pitcher_wins = None
+    fixture.game.home_starting_pitcher_losses = None
+    renderer = ScoreboardRenderer()
+    calls = []
+    original = renderer._text_in_box
+
+    def record(draw, text, box, font, *args, **kwargs):
+        calls.append(str(text))
+        return original(draw, text, box, font, *args, **kwargs)
+
+    renderer._text_in_box = record
+    renderer.render(fixture, (800, 480))
+    assert "G. COLE (12-6)" in calls
+    assert "S. STRIDER" in calls
+    assert "12-6" not in calls and "14-5" not in calls
+
+
+def test_pregame_tbd_starter_renders_without_record():
+    renderer = ScoreboardRenderer()
+    calls = []
+    original = renderer._text_in_box
+
+    def record(draw, text, box, font, *args, **kwargs):
+        calls.append(str(text))
+        return original(draw, text, box, font, *args, **kwargs)
+
+    renderer._text_in_box = record
+    renderer.render(preview_states()["pregame_tbd"], (800, 480))
+    assert calls.count("TBD") == 2
+    assert "12-6" not in calls and "14-5" not in calls
+
+
+def test_long_pregame_starter_name_fits_while_preserving_inline_record():
+    fixture = preview_states()["pregame_starters"]
+    fixture.game.away_starting_pitcher = (
+        "A Very Long Compound Baseball Player Name That Must Fit"
+    )
+    renderer = ScoreboardRenderer()
+    calls = []
+    original = renderer._text_in_box
+
+    def record(draw, text, box, font, *args, **kwargs):
+        calls.append((str(text), box, font))
+        return original(draw, text, box, font, *args, **kwargs)
+
+    renderer._text_in_box = record
+    renderer.render(fixture, (800, 480))
+    name_call = next(call for call in calls if call[0].startswith("A."))
+    assert name_call[0].endswith(" (12-6)")
+    assert "…" in name_call[0]
+    assert ImageDraw.Draw(Image.new("RGB", (1, 1))).textlength(
+        name_call[0], font=name_call[2]
+    ) <= name_call[1][2] - name_call[1][0] - 8
 
 
 @pytest.mark.parametrize("state", ["final_wp_lp", "final_wp_lp_sv"])

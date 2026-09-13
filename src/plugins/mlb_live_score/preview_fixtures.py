@@ -34,7 +34,9 @@ def base_game(**changes) -> GameSummary:
         outs=2, balls=2, strikes=1, pitcher_name="Spencer Strider",
         batter_name="Aaron Judge", scheduled_time=datetime.now(timezone.utc),
         venue="Truist Park", away_starting_pitcher="Gerrit Cole",
-        home_starting_pitcher="Spencer Strider", season=2026,
+        away_starting_pitcher_wins=12, away_starting_pitcher_losses=6,
+        home_starting_pitcher="Spencer Strider", home_starting_pitcher_wins=14,
+        home_starting_pitcher_losses=5, season=2026,
     )
     values.update(changes)
     return GameSummary(**values)
@@ -58,7 +60,7 @@ def preview_states() -> dict[str, ScoreboardPresentation]:
         "live_first_third": presentation(base_game(runner_on_first=True, runner_on_third=True)),
         "live_bases_loaded": presentation(base_game(runner_on_first=True, runner_on_second=True, runner_on_third=True)),
         "pregame_starters": presentation(base_game(state=GameState.PREGAME, status="SCHEDULED", uses_live_layout=False, is_pregame=True, away_runs=None, away_hits=None, away_errors=None, home_runs=None, home_hits=None, home_errors=None)),
-        "pregame_tbd": presentation(base_game(state=GameState.PREGAME, status="SCHEDULED", uses_live_layout=False, is_pregame=True, away_runs=None, away_hits=None, away_errors=None, home_runs=None, home_hits=None, home_errors=None, away_starting_pitcher=None, home_starting_pitcher=None)),
+        "pregame_tbd": presentation(base_game(state=GameState.PREGAME, status="SCHEDULED", uses_live_layout=False, is_pregame=True, away_runs=None, away_hits=None, away_errors=None, home_runs=None, home_hits=None, home_errors=None, away_starting_pitcher=None, away_starting_pitcher_wins=None, away_starting_pitcher_losses=None, home_starting_pitcher=None, home_starting_pitcher_wins=None, home_starting_pitcher_losses=None)),
         "final_wp_lp": presentation(base_game(state=GameState.FINAL, status="FINAL", uses_live_layout=False, is_final=True, inning=9, winning_pitcher="Spencer Strider", winning_pitcher_wins=14, winning_pitcher_losses=5, losing_pitcher="Gerrit Cole", losing_pitcher_wins=11, losing_pitcher_losses=8, pitcher_name=None, batter_name=None)),
         "final_wp_lp_sv": presentation(base_game(state=GameState.FINAL, status="FINAL", uses_live_layout=False, is_final=True, inning=9, winning_pitcher="Spencer Strider", winning_pitcher_wins=14, winning_pitcher_losses=5, losing_pitcher="Gerrit Cole", losing_pitcher_wins=11, losing_pitcher_losses=8, save_pitcher="Raisel Iglesias", save_pitcher_saves=31, pitcher_name=None, batter_name=None)),
         "extra_inning_final": presentation(base_game(state=GameState.FINAL, status="FINAL", uses_live_layout=False, is_final=True, inning=11, winning_pitcher="Spencer Strider", losing_pitcher="Gerrit Cole", save_pitcher=None)),
