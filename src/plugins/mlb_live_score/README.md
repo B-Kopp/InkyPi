@@ -4,7 +4,7 @@ MLB Live Score is a lightweight Pillow-rendered scoreboard backed directly by ML
 
 Select any of the 30 MLB clubs in the InkyPi settings page. The plugin prioritizes a live game, then a completed game today, then an upcoming game today, and finally the next scheduled game. Doubleheaders follow the same deterministic ordering.
 
-Live screens show away/home R/H/E, inning half, outs, pitcher, batter, balls-strikes count, and official base occupancy. Pregame screens show scheduled time, venue, and probable starters. Final screens show WP, LP, and SV when MLB publishes them. When the team is idle, the next matchup and probable pitchers are shown. Every non-live screen uses the right panel for the selected team's official division standings.
+Live screens show away/home R/H/E, inning half, outs, pitcher, batter, balls-strikes count, and official base occupancy. Pregame screens show scheduled time, venue, and probable starters. Final screens show the winning and losing pitchers with their postgame season records, plus the save pitcher and season save total when MLB publishes a save. When the team is idle, the next matchup and probable pitchers are shown. Every non-live screen uses the right panel for the selected team's official division standings.
 
 MLB may temporarily omit hits, errors, probable pitchers, current matchup data, decisions, or runners. Missing fields render as dashes or `TBD`. A schedule or live-feed failure raises a clear plugin error. A standings-only failure does not prevent game rendering: a cached copy is used and marked `CACHED`, or the panel says `STANDINGS UNAVAILABLE`. Standings are cached for 20 minutes; live game data is fetched on every refresh and is never served from that cache.
 

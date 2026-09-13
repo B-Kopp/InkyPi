@@ -41,8 +41,8 @@
         "active_playlist": null
     },
     "refresh_info": {
-        "refresh_time": "2026-09-13T02:35:22.740477+00:00",
-        "image_hash": "2e3494e5a60d5aa90083756a21f6b39fdc5bc9c1b304115e67fc9a586da48975",
+        "refresh_time": "2026-09-13T13:24:37.168693+00:00",
+        "image_hash": "464d88703a69213f902d71dff4c1ce83c3e5089e0115a77e819a256c8fb186be",
         "refresh_type": "Manual Update",
         "plugin_id": "mlb_live_score"
     }

@@ -25,8 +25,10 @@ from plugins.mlb_live_score.renderer import (
     CREAM,
     DARK_GREEN,
     GREEN,
+    LEFT_PANEL_RATIO,
     RenderMetrics,
     ScoreboardRenderer,
+    TypographyScale,
     fit_text,
 )
 
@@ -138,6 +140,22 @@ def standings_payload():
         {"team": {"id": 146, "abbreviation": "MIA"}, "wins": 65, "losses": 80, "gamesBack": "23.0"},
         {"team": {"id": 120, "abbreviation": "WSH"}, "wins": 61, "losses": 84, "gamesBack": "27.0"},
     ]}]}
+
+
+def with_decision_stats(payload, decisions, winner=(14, 5), loser=(11, 8), saves=31):
+    payload["liveData"]["decisions"] = decisions
+    players = payload["liveData"]["boxscore"]["teams"]["away"].setdefault("players", {})
+    stat_lines = {
+        "winner": {"wins": winner[0], "losses": winner[1]},
+        "loser": {"wins": loser[0], "losses": loser[1]},
+        "save": {"saves": saves},
+    }
+    for role, decision in decisions.items():
+        players[f"ID{decision['id']}"] = {
+            "person": decision,
+            "seasonStats": {"pitching": stat_lines[role]},
+        }
+    return payload
 
 
 class FakeResponse:
@@ -263,6 +281,32 @@ def test_decision_pitchers(decisions, expected):
     assert (game.winning_pitcher, game.losing_pitcher, game.save_pitcher) == expected
 
 
+def test_decision_records_and_save_total_use_boxscore_season_stats():
+    decisions = {
+        "winner": {"id": 1, "fullName": "Spencer Strider"},
+        "loser": {"id": 2, "fullName": "Gerrit Cole"},
+        "save": {"id": 3, "fullName": "Raisel Iglesias"},
+    }
+    game = normalize_game(with_decision_stats(feed(), decisions), schedule_game())
+    assert (game.winning_pitcher_wins, game.winning_pitcher_losses) == (14, 5)
+    assert (game.losing_pitcher_wins, game.losing_pitcher_losses) == (11, 8)
+    assert game.save_pitcher_saves == 31
+
+
+def test_missing_decision_season_stats_remain_optional():
+    decisions = {
+        "winner": {"id": 1, "fullName": "Winner"},
+        "loser": {"id": 2, "fullName": "Loser"},
+        "save": {"id": 3, "fullName": "Saver"},
+    }
+    game = normalize_game(feed(decisions=decisions), schedule_game())
+    assert game.winning_pitcher_wins is None
+    assert game.winning_pitcher_losses is None
+    assert game.losing_pitcher_wins is None
+    assert game.losing_pitcher_losses is None
+    assert game.save_pitcher_saves is None
+
+
 def test_missing_optional_live_fields_and_stats_do_not_crash():
     scheduled = schedule_game()
     scheduled["teams"]["away"].pop("score")
@@ -366,6 +410,17 @@ def test_every_preview_fixture_renders_at_800x480(name):
     image = renderer.render(preview_states()[name], (800, 480))
     assert isinstance(image, Image.Image)
     assert image.size == (800, 480)
+
+
+def test_primary_panel_split_is_60_40_at_800x480():
+    metrics = RenderMetrics.for_canvas(800, 480)
+    assert LEFT_PANEL_RATIO == 0.60
+    assert metrics.divider_x == 480
+
+    renderer = ScoreboardRenderer()
+    renderer.render(presentation(), (800, 480))
+    assert renderer.last_layout.left_panel[2] < metrics.divider_x
+    assert renderer.last_layout.right_panel[0] > metrics.divider_x
 
 
 @pytest.mark.parametrize("dimensions", [(640, 400), (480, 800), (400, 300)])
@@ -487,6 +542,149 @@ def test_scoreboard_run_hit_and_error_columns_have_equal_widths(dimensions):
 
     assert stat_widths[0] == stat_widths[1] == stat_widths[2]
     assert x0 < boundaries[0] < boundaries[-1] == x1
+
+
+def test_scoreboard_headers_and_values_share_exact_column_centers_and_role_sizes():
+    renderer = ScoreboardRenderer()
+    calls = []
+    original = renderer._text_in_box
+
+    def record(draw, text, box, font, *args, **kwargs):
+        calls.append((str(text), box, font.size))
+        return original(draw, text, box, font, *args, **kwargs)
+
+    renderer._text_in_box = record
+    renderer.render(presentation(), (800, 480))
+    columns = renderer.last_scoreboard_columns
+    expected_centers = [(columns[i] + columns[i + 1]) / 2 for i in range(1, 4)]
+    header_calls = [call for call in calls if call[0] in {"R", "H", "E"}]
+    assert [((box[0] + box[2]) / 2) for _, box, _ in header_calls] == expected_centers
+    assert {size for _, _, size in header_calls} == {renderer.typography.scoreboard_header}
+
+    scoreboard = renderer.last_layout.scoreboard
+    numeric_calls = [
+        call for call in calls
+        if call[1][1] > scoreboard[1] and call[1][0] in columns[1:-1]
+    ]
+    assert len(numeric_calls) == 6
+    assert {size for _, _, size in numeric_calls} == {renderer.typography.scoreboard_primary}
+    assert [((box[0] + box[2]) / 2) for _, box, _ in numeric_calls[:3]] == expected_centers
+    assert [((box[0] + box[2]) / 2) for _, box, _ in numeric_calls[3:]] == expected_centers
+
+
+def test_live_inning_and_outs_use_the_same_font_size_on_status_line():
+    renderer = ScoreboardRenderer()
+    calls = []
+    original = renderer._text_in_box
+
+    def record(draw, text, box, font, *args, **kwargs):
+        calls.append((str(text), font.size))
+        return original(draw, text, box, font, *args, **kwargs)
+
+    renderer._text_in_box = record
+    renderer.render(presentation(), (800, 480), show_outs=True)
+    status_sizes = {text: size for text, size in calls if text in {"TOP 7TH", "2 OUTS"}}
+    assert status_sizes["TOP 7TH"] == status_sizes["2 OUTS"]
+    assert status_sizes["TOP 7TH"] == renderer.typography.game_status_primary
+
+
+def test_typography_scale_has_stable_semantic_roles():
+    scale = TypographyScale.for_canvas(800, 480)
+    assert scale.scoreboard_primary == 29
+    assert scale.scoreboard_header == 25
+    assert scale.game_status_primary == 28
+    assert scale.player_primary == 25
+    assert scale.label == 17
+    assert TypographyScale.for_canvas(400, 240).scoreboard_primary < scale.scoreboard_primary
+
+
+@pytest.mark.parametrize(
+    "state,expected_rows,expected_result",
+    [
+        ("final_wp_lp", 2, "14-5"),
+        ("final_wp_lp_sv", 3, "31 SV"),
+    ],
+)
+def test_final_pitcher_rows_render_records_and_optional_save(state, expected_rows, expected_result):
+    renderer = ScoreboardRenderer()
+    calls = []
+    original = renderer._text_in_box
+
+    def record(draw, text, box, font, *args, **kwargs):
+        calls.append((str(text), box))
+        return original(draw, text, box, font, *args, **kwargs)
+
+    renderer._text_in_box = record
+    renderer.render(preview_states()[state], (800, 480))
+    assert len(renderer.last_final_rows) == expected_rows
+    assert expected_result in {text for text, _ in calls}
+    assert ({"WP:", "LP:", "SV:"} if expected_rows == 3 else {"WP:", "LP:"}) <= {
+        text for text, _ in calls
+    }
+    if expected_rows == 2:
+        assert "SV:" not in {text for text, _ in calls}
+
+
+def test_final_save_with_missing_total_keeps_row_without_placeholder_total():
+    game = base_game(
+        state=GameState.FINAL, status="FINAL", uses_live_layout=False, is_final=True,
+        winning_pitcher="Winner", losing_pitcher="Loser", save_pitcher="Saver",
+        save_pitcher_saves=None,
+    )
+    renderer = ScoreboardRenderer()
+    renderer.render(presentation(game), (800, 480))
+    assert len(renderer.last_final_rows) == 3
+
+
+def test_long_final_pitcher_name_cannot_overlap_record_column():
+    game = base_game(
+        state=GameState.FINAL, status="FINAL", uses_live_layout=False, is_final=True,
+        winning_pitcher="A Very Long Compound Baseball Player Name That Must Fit",
+        winning_pitcher_wins=14, winning_pitcher_losses=5,
+        losing_pitcher="Gerrit Cole", losing_pitcher_wins=11, losing_pitcher_losses=8,
+    )
+    renderer = ScoreboardRenderer()
+    calls = []
+    original = renderer._text_in_box
+
+    def record(draw, text, box, font, *args, **kwargs):
+        calls.append((str(text), box, font))
+        return original(draw, text, box, font, *args, **kwargs)
+
+    renderer._text_in_box = record
+    renderer.render(presentation(game), (800, 480))
+    name_call = next(call for call in calls if call[0].startswith("A."))
+    result_call = next(call for call in calls if call[0] == "14-5")
+    assert name_call[1][2] <= result_call[1][0]
+    assert ImageDraw.Draw(Image.new("RGB", (1, 1))).textlength(
+        name_call[0], font=name_call[2]
+    ) <= name_call[1][2] - name_call[1][0] - 4
+
+
+@pytest.mark.parametrize("state", ["final_wp_lp", "final_wp_lp_sv"])
+def test_all_postgame_row_allocations_stay_inside_left_panel(state):
+    renderer = ScoreboardRenderer()
+    renderer.render(preview_states()[state], (800, 480))
+    left = renderer.last_layout.left_panel
+    for row in renderer.last_final_rows:
+        assert left[0] <= row[0] < row[2] <= left[2]
+        assert left[1] <= row[1] < row[3] <= left[3]
+
+
+def test_base_diamond_stays_inside_wider_right_panel_content():
+    renderer = ScoreboardRenderer()
+    renderer.render(presentation(), (800, 480))
+    metrics = RenderMetrics.for_canvas(800, 480)
+    right = renderer.last_layout.right_panel
+    content = (
+        right[0] + metrics.panel_padding,
+        right[1] + metrics.panel_padding,
+        right[2] - metrics.panel_padding,
+        right[3] - metrics.panel_padding,
+    )
+    diamond = renderer.last_diamond_bounds
+    assert content[0] <= diamond[0] < diamond[2] <= content[2]
+    assert content[1] <= diamond[1] < diamond[3] <= content[3]
 
 
 def test_plugin_generate_image_uses_settings_and_device_resolution():

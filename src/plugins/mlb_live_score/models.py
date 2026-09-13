@@ -102,8 +102,13 @@ class GameSummary:
     away_starting_pitcher: str | None = None
     home_starting_pitcher: str | None = None
     winning_pitcher: str | None = None
+    winning_pitcher_wins: int | None = None
+    winning_pitcher_losses: int | None = None
     losing_pitcher: str | None = None
+    losing_pitcher_wins: int | None = None
+    losing_pitcher_losses: int | None = None
     save_pitcher: str | None = None
+    save_pitcher_saves: int | None = None
     season: int | None = None
 
 

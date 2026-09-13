@@ -270,6 +270,23 @@ def _team_values(feed: dict[str, Any], schedule: dict[str, Any], side: str) -> t
     return team_id, name, abbreviation, runs, hits, errors, probable
 
 
+def _decision_pitching_stats(
+    live_data: dict[str, Any], decision: dict[str, Any] | None
+) -> dict[str, Any]:
+    """Return the official decision pitcher's postgame season pitching line."""
+    pitcher_id = _int_or_none((decision or {}).get("id"))
+    if pitcher_id is None:
+        return {}
+    player_key = f"ID{pitcher_id}"
+    boxscore_teams = _dig(live_data, "boxscore", "teams", default={})
+    for side in ("away", "home"):
+        player = _dig(boxscore_teams, side, "players", player_key, default={})
+        pitching = _dig(player, "seasonStats", "pitching", default={})
+        if pitching:
+            return pitching
+    return {}
+
+
 def normalize_game(feed: dict[str, Any], schedule: dict[str, Any] | None = None) -> GameSummary:
     schedule = schedule or {}
     game_data = feed.get("gameData") or {}
@@ -285,6 +302,12 @@ def normalize_game(feed: dict[str, Any], schedule: dict[str, Any] | None = None)
     offense = linescore.get("offense") or {}
     defense = linescore.get("defense") or {}
     decisions = live_data.get("decisions") or {}
+    winner = decisions.get("winner") or {}
+    loser = decisions.get("loser") or {}
+    save = decisions.get("save") or {}
+    winner_stats = _decision_pitching_stats(live_data, winner)
+    loser_stats = _decision_pitching_stats(live_data, loser)
+    save_stats = _decision_pitching_stats(live_data, save)
     scheduled_time = _parse_datetime(_dig(game_data, "datetime", "dateTime") or schedule.get("gameDate"))
     season = _int_or_none(_dig(game_data, "game", "season") or schedule.get("season"))
     inning_half = linescore.get("inningHalf")
@@ -316,8 +339,13 @@ def normalize_game(feed: dict[str, Any], schedule: dict[str, Any] | None = None)
         scheduled_time=scheduled_time,
         official_date=str(_dig(game_data, "datetime", "officialDate") or schedule.get("officialDate") or "") or None,
         venue=_dig(game_data, "venue", "name") or _dig(schedule, "venue", "name"),
-        winning_pitcher=_dig(decisions, "winner", "fullName"),
-        losing_pitcher=_dig(decisions, "loser", "fullName"),
-        save_pitcher=_dig(decisions, "save", "fullName"),
+        winning_pitcher=winner.get("fullName"),
+        winning_pitcher_wins=_int_or_none(winner_stats.get("wins")),
+        winning_pitcher_losses=_int_or_none(winner_stats.get("losses")),
+        losing_pitcher=loser.get("fullName"),
+        losing_pitcher_wins=_int_or_none(loser_stats.get("wins")),
+        losing_pitcher_losses=_int_or_none(loser_stats.get("losses")),
+        save_pitcher=save.get("fullName"),
+        save_pitcher_saves=_int_or_none(save_stats.get("saves")),
         season=season,
     )
