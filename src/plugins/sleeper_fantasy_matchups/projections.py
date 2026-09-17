@@ -21,6 +21,7 @@ logger = logging.getLogger(__name__)
 PROJECTION_API = "https://api.sleeper.com"
 REQUEST_TIMEOUT = (5, 15)
 PROJECTION_TTL = timedelta(minutes=20)
+SCHEDULE_TTL = timedelta(seconds=60)
 
 
 class SleeperProjectionAdapter:
@@ -48,7 +49,7 @@ class SleeperProjectionAdapter:
     def _get_schedule(self, season: str, season_type: str) -> list:
         key = ("schedule", str(season), str(season_type))
         cached = self._cache.get(key)
-        if cached and self.now_provider() - cached[0] <= PROJECTION_TTL:
+        if cached and self.now_provider() - cached[0] <= SCHEDULE_TTL:
             return cached[1]
         response = self.session.get(
             f"{PROJECTION_API}/schedule/nfl/{season_type}/{season}",
@@ -122,6 +123,10 @@ def parse_game_progress(payload: Any) -> GameProgress | None:
     if any(token in raw_status for token in ("pre", "schedule", "not_started")):
         return GameProgress(str(game_id), "pregame", 1.0)
     if any(token in raw_status for token in ("progress", "live", "half", "quarter", "overtime")):
+        return GameProgress(str(game_id), "live", _remaining_fraction(payload))
+    if "delay" in raw_status and (payload.get("quarter") or payload.get("period")):
+        # A delayed game which has already entered a period is an interrupted
+        # in-progress game, not a future kickoff.
         return GameProgress(str(game_id), "live", _remaining_fraction(payload))
     # Sleeper commonly leaves ``status`` null on otherwise valid future
     # schedule rows.  The row's presence in the requested week is enough to

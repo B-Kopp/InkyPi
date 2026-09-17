@@ -25,3 +25,12 @@ python src/inkypi.py --dev
 ```
 
 Open `http://localhost:8080`, choose **MLB Live Score**, select a team, and click **Display**.
+
+## Dynamic Scheduler
+
+The scheduler state contract exposes the selected game's lifecycle, inning,
+scores, absolute score difference, lead/trail/tie state, scheduled start, and
+game-today flag. A game is considered close only while live and within two
+runs. The metadata contract supplies friendly fields to the visual rule
+builder. Scheduler evaluation and an immediate render share the plugin's
+30-second normalized presentation cache.

@@ -80,6 +80,9 @@ class FantasyMatchup:
     projections_available: bool = False
     error_state: str | None = None
     is_playoff: bool = False
+    scheduler_is_live: bool = False
+    user_live_starters_count: int = 0
+    opponent_live_starters_count: int = 0
 
     @property
     def status_label(self) -> str:
@@ -111,4 +114,3 @@ class GameProgress:
     game_id: str
     state: str
     remaining_fraction: float | None
-

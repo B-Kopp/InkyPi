@@ -3,5 +3,16 @@
     "orientation": "horizontal",
     "inverted_image": false,
     "scheduler_sleep_time": 60,
+    "dynamic_scheduler": {
+        "enabled": false,
+        "version": 1,
+        "evaluation_interval_seconds": 60,
+        "defaults": {
+            "fallback": "playlist",
+            "return_behavior": "resume_previous",
+            "minimum_display_seconds": 60
+        },
+        "rules": []
+    },
     "startup": true
 }

@@ -14,7 +14,16 @@ Supported public Sleeper endpoints are authoritative for NFL state, users, leagu
 
 Projected player statistics and NFL game status come from Sleeper's undocumented `api.sleeper.com` projection/schedule services. They are isolated behind an optional adapter and are not guaranteed. Schedule rows with a blank status are treated as valid scheduled games. If either service is unavailable or a starter cannot be evaluated reliably, projected totals, remaining-player context, and win chance are omitted while current matchup scores remain visible. The schedule feed does not always expose live clock progress; in that case the estimate is omitted rather than assigning a guessed remaining fraction.
 
-Matchup state is derived from the selected starters' NFL games. Any live game makes the matchup live; a mixture of completed and later scheduled games is also live; and all completed relevant games make it final. Non-zero matchup or player scoring is a fallback signal that kickoff occurred when optional schedule data is stale or incomplete, so a scoring matchup is never labeled pregame.
+For Dynamic Scheduler rules, a fantasy matchup is live only when a player in
+the user's or opponent's `starters` list maps to a game whose actual schedule
+state is live. Bench players, non-zero fantasy scores, an active NFL week,
+future games, completed games, and unknown game states do not count. The
+projection mapping is cached for 20 minutes and the actual schedule for 60
+seconds; evaluation followed by display rendering also shares a 30-second
+normalized dashboard cache. Close live matchups require an available user win
+probability from 35% through 65%; no probability is fabricated.
+
+The dashboard's display label is derived from the selected starters' NFL games. Any live game makes that label live; a mixture of completed and later scheduled games is also shown as live; and all completed relevant games make it final. Non-zero matchup or player scoring is a fallback display signal that kickoff occurred when optional schedule data is stale or incomplete, so a scoring matchup is never labeled pregame. This display fallback does not affect the stricter Dynamic Scheduler live flag described above.
 
 Projected final score is current league-scored points plus only expected points remaining. A starter whose game has not begun contributes the full projection, a completed starter contributes zero, and a live starter contributes the portion corresponding to estimated regulation time remaining. Raw projections are converted with that league's own `scoring_settings`.
 

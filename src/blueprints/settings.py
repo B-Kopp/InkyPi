@@ -5,6 +5,10 @@ import os
 import pytz
 import logging
 import io
+import json
+from plugins.plugin_registry import get_plugin_instance
+from scheduler.config import SchedulerConfigError, load_scheduler_config
+from scheduler.state_provider import StateProvider
 
 # Try to import cysystemd for journal reading (Linux only)
 try:
@@ -29,7 +33,23 @@ settings_bp = Blueprint("settings", __name__)
 def settings_page():
     device_config = current_app.config['DEVICE_CONFIG']
     timezones = sorted(pytz.all_timezones_set)
-    return render_template('settings.html', device_settings=device_config.get_config(), timezones = timezones)
+    scheduler_config = device_config.get_config("dynamic_scheduler", default={
+        "enabled": False,
+        "version": 1,
+        "evaluation_interval_seconds": 60,
+        "defaults": {
+            "fallback": "playlist",
+            "return_behavior": "resume_previous",
+            "minimum_display_seconds": 60,
+        },
+        "rules": [],
+    })
+    return render_template(
+        'settings.html',
+        device_settings=device_config.get_config(),
+        timezones=timezones,
+        dynamic_scheduler_json=json.dumps(scheduler_config, indent=2),
+    )
 
 @settings_bp.route('/save_settings', methods=['POST'])
 def save_settings():
@@ -48,9 +68,30 @@ def save_settings():
         if not time_format or time_format not in ["12h", "24h"]:
             return jsonify({"error": "Time format is required"}), 400
         previous_interval_seconds = device_config.get_config("plugin_cycle_interval_seconds")
+        previous_scheduler_config = device_config.get_config("dynamic_scheduler", default=None)
         plugin_cycle_interval_seconds = calculate_seconds(int(interval), unit)
         if plugin_cycle_interval_seconds > 86400 or plugin_cycle_interval_seconds <= 0:
             return jsonify({"error": "Plugin cycle interval must be less than 24 hours"}), 400
+
+        scheduler_json = form_data.get("dynamicSchedulerConfig", "").strip()
+        try:
+            scheduler_data = json.loads(scheduler_json) if scheduler_json else {}
+        except json.JSONDecodeError as exc:
+            return jsonify({"error": f"Dynamic Scheduler JSON is invalid: {exc.msg} at line {exc.lineno}"}), 400
+        if not isinstance(scheduler_data, dict):
+            return jsonify({"error": "Dynamic Scheduler configuration must be a JSON object"}), 400
+        scheduler_data["enabled"] = "dynamicSchedulerEnabled" in form_data
+        scheduler_data.setdefault("version", 1)
+        scheduler_data.setdefault("evaluation_interval_seconds", 60)
+        scheduler_data.setdefault("defaults", {})
+        scheduler_data.setdefault("rules", [])
+        state_provider = StateProvider(
+            device_config.get_playlist_manager(), device_config, get_plugin_instance
+        )
+        try:
+            load_scheduler_config(scheduler_data, target_exists=state_provider.target_exists)
+        except SchedulerConfigError as exc:
+            return jsonify({"error": f"Dynamic Scheduler configuration is invalid: {exc}"}), 400
 
         settings = {
             "name": form_data.get("deviceName"),
@@ -60,6 +101,7 @@ def save_settings():
             "timezone": form_data.get("timezoneName"),
             "time_format": form_data.get("timeFormat"),
             "plugin_cycle_interval_seconds": plugin_cycle_interval_seconds,
+            "dynamic_scheduler": scheduler_data,
             "image_settings": {
                 "saturation": float(form_data.get("saturation", "1.0")),
                 "brightness": float(form_data.get("brightness", "1.0")),
@@ -71,8 +113,10 @@ def save_settings():
             settings["image_settings"]["inky_saturation"] = float(form_data.get("inky_saturation", "0.5"))
         device_config.update_config(settings)
 
-        if plugin_cycle_interval_seconds != previous_interval_seconds:
-            # wake the background thread up to signal interval config change
+        if (plugin_cycle_interval_seconds != previous_interval_seconds or
+                scheduler_data != previous_scheduler_config):
+            # Reload scheduler state and wake the background thread when either
+            # decision cadence changed.
             refresh_task = current_app.config['REFRESH_TASK']
             refresh_task.signal_config_change()
     except RuntimeError as e:
@@ -145,4 +189,3 @@ def download_logs():
     except Exception as e:
         logger.error(f"Error reading logs: {e}")
         return Response(f"Error reading logs: {e}", status=500, mimetype="text/plain")
-

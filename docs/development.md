@@ -106,6 +106,7 @@ exit                                 # Exit devbox shell and deactivates Python 
 2. **Plugin development**: Copy an existing plugin as template (e.g., `clock/`)
 3. **Configuration**: Edit `src/config/device_dev.json` for display settings
 4. **Hot reload**: Restart server to see code changes
+5. **Scheduler scenarios**: See [Dynamic Scheduler](./dynamic_scheduler.md#development-scenarios) for deterministic state and priority simulations
 
 ## Testing Your Changes
 

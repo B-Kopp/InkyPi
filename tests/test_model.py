@@ -1,6 +1,6 @@
 import pytest
 
-from src.model import Playlist
+from src.model import Playlist, PlaylistManager
 
 class TestPlaylist:
 
@@ -49,4 +49,8 @@ class TestPlaylist:
         playlist = Playlist("Test Playlist", start, end)
         assert playlist.is_active(current) == expected
         assert playlist.get_priority() == priority
-        
+
+
+def test_playlist_manager_normal_refresh_time_round_trips():
+    manager = PlaylistManager([], normal_refresh_time="2026-09-14T12:00:00+00:00")
+    assert PlaylistManager.from_dict(manager.to_dict()).normal_refresh_time == manager.normal_refresh_time

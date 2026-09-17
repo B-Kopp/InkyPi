@@ -1,6 +1,7 @@
 import os
 import json
 import logging
+import uuid
 from datetime import datetime, timedelta
 
 logger = logging.getLogger(__name__)
@@ -67,10 +68,11 @@ class PlaylistManager:
     DEFAULT_PLAYLIST_START = "00:00"
     DEFAULT_PLAYLIST_END = "24:00"
 
-    def __init__(self, playlists=[], active_playlist=None):
+    def __init__(self, playlists=[], active_playlist=None, normal_refresh_time=None):
         """Initialize PlaylistManager with a list of playlists."""
         self.playlists = playlists
         self.active_playlist = active_playlist
+        self.normal_refresh_time = normal_refresh_time
 
     def get_playlist_names(self):
         """Returns a list of all playlist names."""
@@ -146,14 +148,16 @@ class PlaylistManager:
     def to_dict(self):
         return {
             "playlists": [p.to_dict() for p in self.playlists],
-            "active_playlist": self.active_playlist
+            "active_playlist": self.active_playlist,
+            "normal_refresh_time": self.normal_refresh_time,
         }
 
     @classmethod
     def from_dict(cls, data):
         return cls(
             playlists=[Playlist.from_dict(p) for p in data.get("playlists", [])],
-            active_playlist=data.get("active_playlist")
+            active_playlist=data.get("active_playlist"),
+            normal_refresh_time=data.get("normal_refresh_time"),
         )
 
     @staticmethod
@@ -281,7 +285,10 @@ class PluginInstance:
         latest_refresh (str): ISO-formatted string representing the last refresh time.
     """
 
-    def __init__(self, plugin_id, name, settings, refresh, latest_refresh_time=None):
+    def __init__(self, plugin_id, name, settings, refresh, latest_refresh_time=None, instance_id=None):
+        # Legacy device configurations do not contain instance_id. Generate it
+        # once in memory; the next ordinary Config.write_config() persists it.
+        self.instance_id = instance_id or str(uuid.uuid4())
         self.plugin_id = plugin_id
         self.name = name
         self.settings = settings
@@ -341,6 +348,7 @@ class PluginInstance:
     
     def to_dict(self):
         return {
+            "instance_id": self.instance_id,
             "plugin_id": self.plugin_id,
             "name": self.name,
             "plugin_settings": self.settings,
@@ -351,6 +359,7 @@ class PluginInstance:
     @classmethod
     def from_dict(cls, data):
         return cls(
+            instance_id=data.get("instance_id"),
             plugin_id=data["plugin_id"],
             name=data["name"],
             settings=data["plugin_settings"],

@@ -54,6 +54,19 @@ class BasePlugin:
     def generate_image(self, settings, device_config):
         raise NotImplementedError("generate_image must be implemented by subclasses")
 
+    def get_scheduler_state(self, settings, device_config, current_dt):
+        """Return optional normalized state exposed to dynamic scheduler rules.
+
+        Plugins need not implement this method unless users should be able to
+        write state-based rules for them. Time-only rules can target any
+        configured plugin instance.
+        """
+        return {}
+
+    def get_scheduler_state_schema(self):
+        """Describe optional scheduler state fields for user-facing editors."""
+        return {}
+
     def cleanup(self, settings):
         """Optional cleanup method that plugins can override to delete associated resources.
 

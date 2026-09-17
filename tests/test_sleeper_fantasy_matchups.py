@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import sys
 from copy import deepcopy
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest.mock import MagicMock
 
@@ -196,6 +196,49 @@ def test_one_to_four_selected_leagues(count):
     assert all(value.status is MatchupStatus.LIVE for value in dashboard.matchups)
 
 
+def test_nonzero_fantasy_score_does_not_make_scheduler_matchup_live():
+    client, _ = client_for(adapter=FakeProjectionAdapter(("11",), "pregame"))
+    matchup = client.get_dashboard("guru", ["11"]).matchups[0]
+    assert matchup.status is MatchupStatus.LIVE  # display remains backward-compatible
+    assert matchup.scheduler_is_live is False
+    assert matchup.user_live_starters_count == 0
+    assert matchup.opponent_live_starters_count == 0
+
+
+def test_user_and_opponent_live_starters_set_scheduler_live_state():
+    client, _ = client_for(adapter=FakeProjectionAdapter(("11",), "live"))
+    matchup = client.get_dashboard("guru", ["11"]).matchups[0]
+    assert matchup.scheduler_is_live is True
+    assert matchup.user_live_starters_count == 1
+    assert matchup.opponent_live_starters_count == 1
+
+
+@pytest.mark.parametrize(
+    "live_player,expected_counts",
+    [("111", (1, 0)), ("112", (0, 1))],
+)
+def test_either_lineups_actual_starting_player_can_make_matchup_live(live_player, expected_counts):
+    adapter = FakeProjectionAdapter(("11",), "pregame")
+    game_id = adapter.projections[live_player].game_id
+    adapter.games[game_id] = GameProgress(game_id, "live", 0.5)
+    client, _ = client_for(adapter=adapter)
+    matchup = client.get_dashboard("guru", ["11"]).matchups[0]
+    assert matchup.scheduler_is_live is True
+    assert (matchup.user_live_starters_count, matchup.opponent_live_starters_count) == expected_counts
+
+
+def test_live_bench_player_does_not_make_real_matchup_live():
+    resources = {"11": league_resources("11")}
+    resources["11"]["matchups"][0]["players"] = ["111", "bench"]
+    adapter = FakeProjectionAdapter(("11",), "pregame")
+    adapter.projections["bench"] = PlayerProjection("bench", "RB", "gbench", {})
+    adapter.games["gbench"] = GameProgress("gbench", "live", 0.5)
+    client, _ = client_for(("11",), resources, adapter)
+    matchup = client.get_dashboard("guru", ["11"]).matchups[0]
+    assert matchup.scheduler_is_live is False
+    assert matchup.user_live_starters_count == 0
+
+
 def status_rows(points=0, player_points=None):
     return (
         {"starters": ["p1"], "points": points, "players_points": player_points or {}},
@@ -342,6 +385,7 @@ def test_different_matchup_states_across_selected_leagues():
     client, _ = client_for(("11", "22"), adapter=adapter)
     values = client.get_dashboard("guru", ["11", "22"]).matchups
     assert [value.status for value in values] == [MatchupStatus.LIVE, MatchupStatus.FINAL]
+    assert [value.scheduler_is_live for value in values] == [False, False]
 
 
 def test_projection_parsing():
@@ -383,6 +427,23 @@ def test_successful_projection_and_schedule_payloads_are_cached_by_week():
     adapter = SleeperProjectionAdapter(session, lambda: NOW)
     assert adapter.get_week("2026", 1) == adapter.get_week("2026", 1)
     assert session.get.call_count == 2
+
+
+def test_nfl_schedule_state_cache_refreshes_without_redownloading_projections():
+    current = [NOW]
+    session = MagicMock()
+    session.get.side_effect = [
+        FakeResponse([{"player_id": "p1", "game_id": "g1", "stats": {"pass_yd": 250}}]),
+        FakeResponse([{"game_id": "g1", "week": 1, "status": "scheduled"}]),
+        FakeResponse([{"game_id": "g1", "week": 1, "status": "in_progress"}]),
+    ]
+    adapter = SleeperProjectionAdapter(session, lambda: current[0])
+    assert adapter.get_week("2026", 1)[1]["g1"].state == "pregame"
+    current[0] += timedelta(seconds=30)
+    assert adapter.get_week("2026", 1)[1]["g1"].state == "pregame"
+    current[0] += timedelta(seconds=31)
+    assert adapter.get_week("2026", 1)[1]["g1"].state == "live"
+    assert session.get.call_count == 3
 
 
 def test_missing_projection_hides_both_estimates_without_hiding_score():

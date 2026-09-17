@@ -14,11 +14,15 @@
         })();
     </script>
     <link rel="stylesheet" type="text/css" href="{{ url_for('static',filename='styles/main.css') }}">
+    <link rel="stylesheet" type="text/css" href="{{ url_for('static',filename='scheduler_settings.css') }}">
     <script src="{{ url_for('static', filename='scripts/dark_mode.js') }}"></script>
     <script src="{{ url_for('static', filename='scripts/response_modal.js') }}"></script>
     <script>
         async function handleAction() {
             const form = document.querySelector('.settings-form');
+            if (window.schedulerSettings && !window.schedulerSettings.prepareFormSave()) {
+                return;
+            }
             const formData = new FormData(form);
 
             try {
@@ -32,7 +36,6 @@
                     showResponseModal('success', `Success! ${result.message}`);
                 } else {
                     showResponseModal('failure', `Error!  ${result.error}`);
-                    form.reset();
                 }
             } catch (error) {
                 console.error('Error:', error);
@@ -273,6 +276,61 @@
                         {% endif %}
                     </div>
                 </div>
+                <div class="collapsible">
+                    <button type="button" class="collapsible-header" onclick="toggleCollapsible(this)">
+                        Dynamic Scheduler <span class="collapsible-icon">▼</span>
+                    </button>
+                    <div class="settings-container collapsible-content scheduler-settings" id="schedulerSettings">
+                        <div class="scheduler-heading">
+                            <div>
+                                <h2>Dynamic Scheduler</h2>
+                                <p>Temporarily show the most important matching display. Your normal playlist remains the fallback.</p>
+                            </div>
+                            <label class="scheduler-switch" for="dynamicSchedulerEnabled">
+                                <span>Enabled</span>
+                                <input type="checkbox" id="dynamicSchedulerEnabled" name="dynamicSchedulerEnabled"
+                                    {% if device_settings.get('dynamic_scheduler', {}).get('enabled', false) %}checked{% endif %}>
+                            </label>
+                        </div>
+
+                        <section class="scheduler-panel" aria-labelledby="scheduler-status-title">
+                            <div class="scheduler-section-heading">
+                                <h3 id="scheduler-status-title">Current Status</h3>
+                                <button type="button" class="scheduler-link-button" id="schedulerRefreshStatus">Refresh</button>
+                            </div>
+                            <div id="schedulerStatus" class="scheduler-status" aria-live="polite">Loading scheduler status…</div>
+                        </section>
+
+                        <section class="scheduler-panel" aria-labelledby="scheduler-rules-title">
+                            <div class="scheduler-section-heading scheduler-rule-actions">
+                                <h3 id="scheduler-rules-title">Rules</h3>
+                                <div>
+                                    <button type="button" class="secondary-button" id="schedulerTestAll">Test All</button>
+                                    <button type="button" class="action-button" id="schedulerAddRule">+ Add Rule</button>
+                                </div>
+                            </div>
+                            <div id="schedulerRuleList" class="scheduler-rule-list" aria-live="polite"></div>
+                        </section>
+
+                        <section class="scheduler-panel">
+                            <div class="scheduler-section-heading">
+                                <h3>Diagnostics</h3>
+                                <button type="button" class="secondary-button" id="schedulerViewState">View Current State</button>
+                            </div>
+                            <p>Inspect the compact state that plugins make available to scheduler rules.</p>
+                        </section>
+
+                        <details class="scheduler-advanced">
+                            <summary>Advanced JSON</summary>
+                            <p>The visual builder and this editor use the same configuration. Invalid JSON cannot replace the last valid configuration.</p>
+                            <label for="dynamicSchedulerConfig" class="form-label">Scheduler configuration</label>
+                            <textarea id="dynamicSchedulerConfig" name="dynamicSchedulerConfig" class="form-input scheduler-json"
+                                rows="20" spellcheck="false">{{ dynamic_scheduler_json }}</textarea>
+                            <div id="schedulerJsonError" class="scheduler-field-error" role="alert"></div>
+                            <button type="button" class="secondary-button" id="schedulerApplyJson">Apply JSON to visual builder</button>
+                        </details>
+                    </div>
+                </div>
             </div>
         </form>
  
@@ -283,5 +341,9 @@
     </div>
     <!-- Success/Error Modal -->
     {% include 'response_modal.html' %}
+    <dialog id="schedulerDialog" class="scheduler-dialog">
+        <div id="schedulerDialogContent"></div>
+    </dialog>
+    <script src="{{ url_for('static', filename='scheduler_settings.js') }}"></script>
 </body>
 </html>

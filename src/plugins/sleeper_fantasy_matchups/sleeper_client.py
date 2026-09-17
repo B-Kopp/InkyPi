@@ -230,6 +230,8 @@ class SleeperClient:
         status = classify_matchup_status(
             user_row, opponent_row, games, projections, league.status
         )
+        user_live_starters = count_live_starters(user_row, projections, games)
+        opponent_live_starters = count_live_starters(opponent_row, projections, games)
         projections_available = (
             user_side.projected_final is not None and opponent_side.projected_final is not None
         )
@@ -248,6 +250,9 @@ class SleeperClient:
         return FantasyMatchup(
             league.league_id, league.name, week, status, user_side, opponent_side,
             self.now_provider(), projections_available, is_playoff=week >= playoff_start,
+            scheduler_is_live=(user_live_starters + opponent_live_starters) > 0,
+            user_live_starters_count=user_live_starters,
+            opponent_live_starters_count=opponent_live_starters,
         )
 
     @staticmethod
@@ -365,3 +370,21 @@ def classify_matchup_status(
     if str(league_status).lower() == "complete":
         return MatchupStatus.FINAL
     return MatchupStatus.PREGAME
+
+
+def count_live_starters(row, projections, games) -> int:
+    """Count only fantasy starters whose mapped NFL game is in progress."""
+    starter_ids = {
+        str(player_id)
+        for player_id in (row.get("starters") or [])
+        if str(player_id) not in {"", "0", "None"}
+    }
+    count = 0
+    for player_id in starter_ids:
+        projection = projections.get(player_id)
+        if projection is None or projection.game_id is None:
+            continue
+        progress = games.get(projection.game_id)
+        if progress is not None and progress.state == "live":
+            count += 1
+    return count
