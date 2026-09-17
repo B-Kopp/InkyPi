@@ -76,6 +76,7 @@ class RuleActivation:
     rule_id: str
     activated_at: datetime
     expires_at: datetime | None = None
+    occurrence_at: datetime | None = None
 
 
 @dataclass
@@ -99,6 +100,7 @@ class SchedulingDecision:
     return_behavior: str
     reason: str
     changed: bool = False
+    occurrence_at: datetime | None = None
 
 
 @dataclass(frozen=True)

@@ -197,3 +197,103 @@ def test_dst_nonexistent_skipped_ambiguous_once_per_local_minute(tz):
 def test_invalid_schedule_rejected(schedule):
     with pytest.raises(SchedulerConfigError):
         engine(schedule)
+
+
+@pytest.mark.parametrize("minute,second", [(15, 0), (15, 27), (16, 10)])
+def test_fixed_occurrence_expiration_uses_scheduled_time(minute, second, caplog):
+    value = engine({"type": "minute_of_hour", "minutes": [15]},
+                   duration={"mode": "fixed", "seconds": 180})
+    value.evaluate(dt(hour=15, minute=14, second=50), no_state)
+    detected = dt(hour=15, minute=minute, second=second)
+    with caplog.at_level("INFO"):
+        decision = value.evaluate(detected, no_state).decision
+    assert decision.occurrence_at == dt(hour=15, minute=15)
+    assert decision.activated_at == detected
+    assert decision.expires_at == dt(hour=15, minute=18)
+    assert value.state.activations["timed"].occurrence_at == decision.occurrence_at
+    assert "scheduled_at=" + decision.occurrence_at.isoformat() in caplog.text
+    assert "activated_at=" + detected.isoformat() in caplog.text
+    assert "expires_at=" + decision.expires_at.isoformat() in caplog.text
+    assert f"remaining_seconds={(decision.expires_at - detected).total_seconds()}" in caplog.text
+    assert value.evaluate(dt(hour=15, minute=18), no_state).decision is None
+
+
+@pytest.mark.parametrize("second", [0, 10])
+def test_already_expired_occurrence_is_consumed_without_activation(second, caplog):
+    value = engine({"type": "minute_of_hour", "minutes": [15]},
+                   duration={"mode": "fixed", "seconds": 180})
+    value.evaluate(dt(hour=15, minute=14), no_state)
+    with caplog.at_level("INFO"):
+        assert value.evaluate(dt(hour=15, minute=18, second=second), no_state).decision is None
+    assert not value.state.activations
+    assert not value.state.cooldown_until
+    assert "skipped as expired" in caplog.text
+    assert value.state.occurrence_keys["timed"] == "2026-09-17T15:15"
+
+
+@pytest.mark.parametrize("release_minute", [20, 24])
+def test_blocked_occurrences_remain_skipped_without_replay(release_minute, caplog):
+    high = {"id": "high", "priority": 80, "target": {"instance_id": "high"},
+            "conditions": {"source_instance_id": "high", "path": "live", "operator": "truthy"},
+            "duration": {"mode": "while_true", "min_seconds": 0}}
+    value = engine({"type": "minute_of_hour", "minutes": [18]}, high,
+                   duration={"mode": "fixed", "seconds": 300})
+    value.evaluate(dt(hour=15, minute=17), lambda _: (True, {"live": True}))
+    with caplog.at_level("INFO"):
+        assert value.evaluate(dt(hour=15, minute=18, second=27), lambda _: (True, {"live": True})).decision.rule_id == "high"
+    assert "skipped while blocked" in caplog.text
+    assert "timed" not in value.state.activations
+    assert value.evaluate(dt(hour=15, minute=release_minute), lambda _: (True, {"live": False})).decision is None
+
+
+def test_expiring_clock_no_longer_blocks_countdown_occurrence():
+    countdown = raw({"type": "minute_of_hour", "minutes": [18]}, id="countdown", priority=10)
+    value = engine({"type": "minute_of_hour", "minutes": [15]}, countdown,
+                   duration={"mode": "fixed", "seconds": 180})
+    clock = value.evaluate(dt(hour=16, minute=15, second=27), no_state).decision
+    assert clock.expires_at == dt(hour=16, minute=18)
+    result = value.evaluate(dt(hour=16, minute=18, second=10), no_state).decision
+    assert result.rule_id == "countdown"
+    assert result.expires_at == dt(hour=16, minute=20)
+
+
+def test_consecutive_occurrences_across_hour_and_day_boundaries():
+    value = engine({"type": "minute_of_hour", "minutes": [0, 15, 55]},
+                   duration={"mode": "fixed", "seconds": 180})
+    for scheduled in (dt(hour=23, minute=55), dt(day=18, hour=0, minute=0), dt(day=18, hour=0, minute=15)):
+        result = value.evaluate(scheduled + timedelta(seconds=27), no_state).decision
+        assert result.occurrence_at == scheduled
+        assert result.expires_at == scheduled + timedelta(seconds=180)
+
+
+def test_occurrence_while_true_maximum_remains_activation_anchored():
+    value = engine({"type": "minute_of_hour", "minutes": [15]},
+                   duration={"mode": "while_true", "min_seconds": 180, "max_seconds": 300})
+    detected = dt(hour=15, minute=15, second=27)
+    result = value.evaluate(detected, no_state).decision
+    assert result.activated_at == detected
+    assert result.expires_at == detected + timedelta(seconds=300)
+    assert value.evaluate(dt(hour=15, minute=18), no_state).decision
+
+
+def test_non_occurrence_fixed_duration_remains_activation_anchored():
+    rule = raw({}, conditions={"time": {}}, duration={"mode": "fixed", "seconds": 180})
+    rule.pop("schedule")
+    value = DynamicScheduler(load_scheduler_config({"enabled": True, "rules": [rule]}))
+    detected = dt(hour=15, minute=15, second=27)
+    result = value.evaluate(detected, no_state).decision
+    assert result.occurrence_at is None
+    assert result.expires_at == detected + timedelta(seconds=180)
+    assert value.evaluate(dt(hour=15, minute=18), no_state).decision
+
+
+def test_fixed_occurrence_duration_across_dst_is_elapsed_seconds():
+    value = engine({"type": "daily", "times": ["01:55"]},
+                   duration={"mode": "fixed", "seconds": 600})
+    scheduled = datetime(2026, 11, 1, 1, 55, tzinfo=TZ)
+    detected = scheduled + timedelta(seconds=27)
+    result = value.evaluate(detected, no_state).decision
+    assert result.expires_at.hour == 1 and result.expires_at.minute == 5
+    assert result.expires_at.fold == 1
+    assert value.evaluate(datetime(2026, 11, 1, 1, 4, tzinfo=TZ, fold=1), no_state).decision
+    assert value.evaluate(datetime(2026, 11, 1, 1, 5, tzinfo=TZ, fold=1), no_state).decision is None
