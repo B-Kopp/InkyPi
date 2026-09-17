@@ -1,7 +1,10 @@
 import sys
+import runpy
 from copy import deepcopy
 from datetime import datetime, timezone
 from pathlib import Path
+
+import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
@@ -94,6 +97,53 @@ def client(monkeypatch):
     device, refresh = Device(), Refresh()
     app.config.update(DEVICE_CONFIG=device, REFRESH_TASK=refresh)
     return app.test_client(), device, refresh
+
+
+@pytest.mark.parametrize("dev_mode", [False, True], ids=["production", "development"])
+def test_application_startup_registers_scheduler_routes(monkeypatch, dev_mode):
+    """Use the actual app registration, not this module's isolated test app."""
+    import config as config_module
+    import display.display_manager as display_module
+    import refresh_task as refresh_module
+    import plugins.plugin_registry as registry_module
+    import logging.config
+    import pi_heif
+
+    class ApplicationConfig(Device):
+        BASE_DIR = config_module.Config.BASE_DIR
+        config_file = config_module.Config.config_file
+
+        def get_plugins(self):
+            return []
+
+    refresh = Refresh()
+    monkeypatch.setattr(config_module, "Config", ApplicationConfig)
+    monkeypatch.setattr(display_module, "DisplayManager", lambda _device: object())
+    monkeypatch.setattr(refresh_module, "RefreshTask", lambda _device, _display: refresh)
+    monkeypatch.setattr(registry_module, "load_plugins", lambda _plugins: None)
+    monkeypatch.setattr(scheduler_routes, "get_plugin_instance", lambda _config: Plugin())
+    monkeypatch.setattr(logging.config, "fileConfig", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(pi_heif, "register_heif_opener", lambda: None)
+    monkeypatch.setattr(sys, "argv", ["inkypi.py"] + (["--dev"] if dev_mode else []))
+
+    # A non-main run name loads app startup without starting threads or a server.
+    application = runpy.run_path(
+        str(Path(__file__).resolve().parents[1] / "src" / "inkypi.py"),
+        run_name="inkypi_registration_test",
+    )
+    app = application["app"]
+    assert application["DEV_MODE"] is dev_mode
+    assert app.blueprints["scheduler"] is scheduler_bp
+    registered_paths = {route.rule for route in app.url_map.iter_rules()}
+    assert {
+        "/scheduler/config", "/scheduler/status", "/scheduler/state",
+        "/scheduler/test-rule", "/scheduler/test-all",
+    } <= registered_paths
+    browser = app.test_client()
+    for path in ("/scheduler/config", "/scheduler/status"):
+        response = browser.get(path)
+        assert response.status_code == 200, (path, response.status_code)
+        assert response.is_json
 
 
 def test_config_catalog_contains_stable_ids_and_schema(monkeypatch):
