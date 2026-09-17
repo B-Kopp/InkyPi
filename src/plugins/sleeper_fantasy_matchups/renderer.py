@@ -23,6 +23,10 @@ FONT_DIR = Path(__file__).resolve().parents[2] / "static" / "fonts"
 REGULAR_FONT = FONT_DIR / "Jost.ttf"
 BOLD_FONT = FONT_DIR / "Jost-SemiBold.ttf"
 PIXEL_FONT = FONT_DIR / "dogicapixelbold.ttf"
+MIN_SECONDARY_SIZE = 14
+PROBABILITY_BAR_HEIGHT = 14  # Reference 800x480 height, including the border.
+CENTER_SEPARATOR_FONT_SIZE = 24
+CENTER_SEPARATOR_PADDING = 8
 
 
 class Density(str, Enum):
@@ -61,10 +65,10 @@ class TypeRole:
 # WIN_PERCENT, WIN_LABEL, PROJECTION, CONTEXT and ERROR_STATE are represented
 # once here rather than as scattered literals in drawing code.
 TYPE_REFERENCE = {
-    Density.HERO: TypeRole(18, 27, 17, 27, 19, 16, 58, 44, 15, 22, 14, 17, 15, 13, 12),
-    Density.LARGE: TypeRole(16, 22, 14, 21, 15, 13, 46, 34, 13, 17, 12, 14, 13, 12, 11),
-    Density.MEDIUM: TypeRole(14, 18, 12, 18, 15, 12, 38, 30, 11, 16, 11, 13, 12, 11, 10),
-    Density.COMPACT: TypeRole(14, 17, 11, 19, 15, 11, 39, 28, 11, 18, 11, 12, 11, 10, 9),
+    Density.HERO: TypeRole(18, 27, 18, 27, 19, 18, 58, 44, CENTER_SEPARATOR_FONT_SIZE + 4, 22, 16, 19, 16, 14, 14),
+    Density.LARGE: TypeRole(16, 23, 16, 23, 18, 16, 46, 34, CENTER_SEPARATOR_FONT_SIZE, 20, 14, 16, 14, 14, 14),
+    Density.MEDIUM: TypeRole(14, 20, 14, 20, 16, 14, 38, 30, CENTER_SEPARATOR_FONT_SIZE, 18, 14, 15, 14, 14, 14),
+    Density.COMPACT: TypeRole(14, 19, 14, 21, 16, 14, 39, 28, CENTER_SEPARATOR_FONT_SIZE, 20, 14, 14, 14, 14, 14),
 }
 
 
@@ -89,10 +93,10 @@ class SpaceRole:
 
 
 SPACE_REFERENCE = {
-    Density.HERO: SpaceRole(24, 18, 42, 10, 72, 108, 0, 76, 68, 2, 2, 8, 12, 42),
-    Density.LARGE: SpaceRole(16, 10, 30, 5, 43, 58, 0, 44, 56, 2, 1, 7, 9, 22),
-    Density.MEDIUM: SpaceRole(14, 10, 29, 5, 43, 57, 1, 48, 46, 2, 1, 6, 8, 0),
-    Density.COMPACT: SpaceRole(14, 10, 29, 5, 43, 57, 0, 48, 44, 2, 1, 6, 8, 0),
+    Density.HERO: SpaceRole(24, 18, 42, 10, 72, 108, 0, 76, 68, 2, 2, 8, PROBABILITY_BAR_HEIGHT + 4, 42),
+    Density.LARGE: SpaceRole(16, 10, 30, 5, 43, 58, 0, 44, 56, 2, 1, 7, PROBABILITY_BAR_HEIGHT + 1, 22),
+    Density.MEDIUM: SpaceRole(14, 10, 29, 5, 43, 57, 1, 48, 46, 2, 1, 6, PROBABILITY_BAR_HEIGHT, 0),
+    Density.COMPACT: SpaceRole(14, 10, 29, 5, 43, 57, 0, 48, 44, 2, 1, 6, PROBABILITY_BAR_HEIGHT, 0),
 }
 
 
@@ -123,7 +127,8 @@ def _canvas_scale(canvas: tuple[int, int]) -> float:
 def _scaled_roles(density: Density, canvas: tuple[int, int]) -> TypeRole:
     scale = _canvas_scale(canvas)
     base = TYPE_REFERENCE[density]
-    return TypeRole(*(max(8, round(value * scale)) for value in base.__dict__.values()))
+    floor = max(8, round(MIN_SECONDARY_SIZE * scale))
+    return TypeRole(*(max(floor, round(value * scale)) for value in base.__dict__.values()))
 
 
 def _scaled_spacing(density: Density, canvas: tuple[int, int]) -> SpaceRole:
@@ -191,6 +196,10 @@ class MatchupDashboardRenderer:
         self.last_spacing = {}
         self.last_zones = []
         self.last_text_bounds = []
+        self.last_text_sizes = []
+        self.last_divider_segments = []
+        self.last_separator_clear_zones = []
+        self.last_probability_bars = []
         self._card_box = (0, 0, 0, 0)
 
     def render(self, dashboard: DashboardModel, dimensions: tuple[int, int], *, show_projected=True, show_probability=True, show_records=True, show_context=True) -> Image.Image:
@@ -199,6 +208,8 @@ class MatchupDashboardRenderer:
         placements = layout_for_count(dimensions, len(dashboard.matchups))
         self.last_card_bounds = [item.bounds for item in placements]
         self.last_content_bounds, self.last_zones, self.last_text_bounds = [], [], []
+        self.last_text_sizes, self.last_divider_segments = [], []
+        self.last_separator_clear_zones, self.last_probability_bars = [], []
         self.last_typography, self.last_spacing = {}, {}
         for matchup, placement in zip(dashboard.matchups, placements):
             roles = _scaled_roles(placement.density, dimensions)
@@ -211,6 +222,7 @@ class MatchupDashboardRenderer:
         draw.text(xy, str(value), font=font, fill=fill, anchor=anchor)
         raw = draw.textbbox(xy, str(value), font=font, anchor=anchor)
         self.last_text_bounds.append((role, tuple(int(v) for v in raw), self._card_box))
+        self.last_text_sizes.append((role, font.size, self._card_box))
 
     @staticmethod
     def _zones(content, spacing, has_projection, include_footer):
@@ -275,9 +287,10 @@ class MatchupDashboardRenderer:
     def _draw_header(self, draw, box, roles, spacing, matchup):
         x0, y0, x1, y1 = box
         status_text = f"WK {matchup.week} • {matchup.status_label}"
-        status, status_font = fit_text(draw, status_text, (x1 - x0) * .34, roles.card_status, max(10, roles.card_status - 2), True)
+        floor = roles.context_secondary
+        status, status_font = fit_text(draw, status_text, (x1 - x0) * .34, roles.card_status, floor, True)
         status_w = _text_width(draw, status, status_font)
-        league, league_font = fit_text(draw, matchup.league_name, x1 - x0 - status_w - max(12, spacing.section_gap * 3), roles.card_league, max(13, roles.card_league - 5), True)
+        league, league_font = fit_text(draw, matchup.league_name, x1 - x0 - status_w - max(12, spacing.section_gap * 3), roles.card_league, max(floor, roles.card_league - 3), True)
         # Pull the shared baseline slightly upward so even tall glyphs retain
         # an 8px breathing gap above the header divider in LARGE cards.
         baseline = y0 + max(league_font.getmetrics()[0], status_font.getmetrics()[0]) - 4
@@ -291,12 +304,16 @@ class MatchupDashboardRenderer:
         name, font = fit_text(draw, side.team_name, x1 - x0, roles.team_name, roles.team_name_min, True)
         self._text(draw, (x, y0 + 1), name, role="team_name", font=font, fill=CREAM, anchor=anchor)
         label = (f"YOU   {side.record}" if is_user else f"{side.record}   OPP") if show_records else ("YOU" if is_user else "OPP")
-        meta_font = _font(roles.team_record, bold=True)
-        self._text(draw, (x, min(y1 - meta_font.size, y0 + font.size + 6)), label, role="team_meta", font=meta_font, fill=LIME if is_user else MUTED, anchor=anchor)
+        label, meta_font = fit_text(draw, label, x1 - x0, roles.team_record, roles.context_secondary, True)
+        self._text(draw, (x, y1 - 2), label, role="team_meta", font=meta_font, fill=LIME if is_user else MUTED, anchor="ls" if is_user else "rs")
 
     def _draw_scores(self, draw, box, roles, spacing, left_value, right_value):
         x0, y0, x1, y1 = box
         mid, center_half = (x0 + x1) // 2, spacing.center_width // 2
+        vs_font = _font(roles.center_label, bold=True)
+        glyph = draw.textbbox((0, 0), "vs", font=vs_font)
+        padding = max(2, round(CENTER_SEPARATOR_PADDING * vs_font.size / CENTER_SEPARATOR_FONT_SIZE))
+        center_half = max(center_half, (glyph[2] - glyph[0] + 1) // 2 + padding)
         left_box, right_box = (x0, y0, mid - center_half, y1), (mid + center_half, y0, x1, y1)
         values, size = (display_score(left_value), display_score(right_value)), roles.score
         width = min(left_box[2] - left_box[0], right_box[2] - right_box[0])
@@ -307,9 +324,21 @@ class MatchupDashboardRenderer:
         baseline = min(y1 - descent, y0 + (y1 - y0 + ascent - descent) // 2)
         self._text(draw, ((left_box[0] + left_box[2]) // 2, baseline), values[0], role="score", font=font, fill=CREAM, anchor="ms")
         self._text(draw, ((right_box[0] + right_box[2]) // 2, baseline), values[1], role="score", font=font, fill=CREAM, anchor="ms")
-        line_h, cy = min(44, max(32, y1 - y0 - 10)), (y0 + y1) // 2
-        draw.line((mid, cy - line_h // 2, mid, cy + line_h // 2), fill=MUTED, width=spacing.divider)
-        self._text(draw, (mid, cy), "VS", role="vs", font=_font(roles.center_label, bold=True, pixel=True), fill=YELLOW, anchor="mm")
+        self._draw_center_separator(draw, (mid - center_half, y0, mid + center_half, y1), vs_font)
+
+    def _draw_center_separator(self, draw, box, font):
+        """Use the label itself as separator, with no optical center-line stroke.
+
+        A 4px glyph gap still left collinear divider stubs visually resembling
+        an I between V and S. Protect the entire reserved score-center strip,
+        not merely the glyph box. Draw the clean background last, before text.
+        """
+        x0, y0, x1, y1 = box
+        draw.rectangle((x0, y0, x1, y1 - 1), fill=CARD)
+        self.last_separator_clear_zones.append(((x0, y0, x1, y1 - 1), self._card_box))
+        glyph = draw.textbbox((0, 0), "vs", font=font)
+        top = (y0 + y1 - (glyph[3] - glyph[1])) // 2
+        self._text(draw, ((x0 + x1) // 2, top), "vs", role="vs", font=font, fill=YELLOW, anchor="mt")
 
     def _draw_analytics(self, draw, box, roles, spacing, density, matchup, show_projected, show_probability):
         x0, y0, x1, y1 = box
@@ -335,13 +364,16 @@ class MatchupDashboardRenderer:
         self._text(draw, (x1, baseline), f"{100-pct}%", role="win_percent", font=percent_font, fill=CREAM, anchor="rs")
         inset = round((x1 - x0) * .20)
         bar_x0, bar_x1 = x0 + inset, x1 - inset
-        bar_y0 = row_top + max(3, (percent_font.size - spacing.probability_bar) // 2)
-        bar_y1 = min(y1, bar_y0 + spacing.probability_bar)
+        bar_y0 = row_top + max(0, (percent_font.size - spacing.probability_bar) // 2)
+        # Pillow rectangles include both endpoints: height is exactly the shared
+        # spacing value, and remains centered beside the percentage row.
+        bar_y1 = min(y1 - 1, bar_y0 + spacing.probability_bar - 1)
         split = bar_x0 + round((bar_x1 - bar_x0) * probability)
         draw.rectangle((bar_x0, bar_y0, bar_x1, bar_y1), fill=CREAM, outline=BLACK, width=1)
         if split > bar_x0:
-            draw.rectangle((bar_x0 + 1, bar_y0 + 1, split, bar_y1 - 1), fill=LIME)
-        self._text(draw, ((x0 + x1) // 2, min(y1, row_top + percent_font.size + 2)), "WIN CHANCE", role="win_label", font=label_font, fill=MUTED, anchor="ma")
+            draw.rectangle((bar_x0 + 1, bar_y0 + 1, min(split, bar_x1 - 1), bar_y1 - 1), fill=LIME)
+        self.last_probability_bars.append(((bar_x0, bar_y0, bar_x1, bar_y1), probability, self._card_box))
+        self._text(draw, ((x0 + x1) // 2, row_top + percent_font.size + 2), "WIN CHANCE", role="win_label", font=label_font, fill=MUTED, anchor="mt")
 
     def _draw_context(self, draw, box, roles, user, opponent):
         left, right = display_context(user), display_context(opponent)

@@ -34,3 +34,26 @@ game-today flag. A game is considered close only while live and within two
 runs. The metadata contract supplies friendly fields to the visual rule
 builder. Scheduler evaluation and an immediate render share the plugin's
 30-second normalized presentation cache.
+
+Two boolean fields support nearby pregame/final displays:
+`game.pregame_within_2_hours` requires today's unstarted game and scheduled first
+pitch zero to two hours ahead. Next-day games and overdue delayed starts do not
+qualify. `game.final_within_3_hours` requires today's final and an end timestamp
+zero to three hours old, on the current device-local day. The timestamp is the
+existing live feed's completed terminal play `about.endTime`, not its publication
+time or when this plugin first saw Final. This is a conservative proxy: called
+games or administrative decisions may become final after the last baseball
+action, causing the flag to expire early. Missing/incomplete/naive timestamps
+return false; no extra request or estimated game length is used.
+
+Half-inning transitions are normalized atomically. A new current play with its
+own inning, matchup and count, or a verified next batting team with both changed
+participants, can establish the new half. Otherwise the ended play's half,
+participants, count, bases and available scores remain together. Unverifiable
+participants/counts are shown as unavailable rather than guessed. Automatic
+extra-inning runners are preserved when the next offense is identified.
+
+The live diamond heading describes the same occupancy used to draw its bases,
+using canonical ALL CAPS labels centered over the diamond.
+Probable and decision pitchers share the existing initial/surname presentation,
+with their optional record/save total immediately beside the name in parentheses.

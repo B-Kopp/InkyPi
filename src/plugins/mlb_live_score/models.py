@@ -97,6 +97,8 @@ class GameSummary:
     runner_on_second: bool = False
     runner_on_third: bool = False
     scheduled_time: datetime | None = None
+    # Completed terminal play endTime, not feed-update/first-observed-final time.
+    ended_at: datetime | None = None
     official_date: str | None = None
     venue: str | None = None
     away_starting_pitcher: str | None = None

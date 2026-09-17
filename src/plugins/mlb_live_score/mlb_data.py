@@ -54,7 +54,8 @@ def _parse_datetime(value: Any) -> datetime | None:
     if not value:
         return None
     try:
-        return datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+        parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+        return parsed if parsed.tzinfo is not None and parsed.utcoffset() is not None else None
     except (TypeError, ValueError):
         return None
 
@@ -422,6 +423,125 @@ def _decision_pitching_stats(
     return _pitching_stats_for_player(live_data, decision)
 
 
+def _terminal_play_end(live_data):
+    """Conservative final-time proxy from the existing feed; never estimate.
+
+    A normal final's last completed play is when baseball action ended. Called
+    games/administrative finals can be declared later, so this proxy may expire
+    early. Feed metadata timestamps describe publication, not game completion.
+    Missing/incomplete/naive terminal timestamps deliberately remain unavailable.
+    """
+    plays = live_data.get("plays") or {}
+    all_plays = plays.get("allPlays") or []
+    terminal = all_plays[-1] if all_plays else plays.get("currentPlay") or {}
+    about = terminal.get("about") or {}
+    return _parse_datetime(about.get("endTime")) if about.get("isComplete") is True else None
+
+
+def _live_snapshot(linescore, current_play, away_id, home_id, all_plays=()):
+    """Keep half-inning transitions atomic rather than mixing feed sections."""
+    offense, defense = linescore.get("offense") or {}, linescore.get("defense") or {}
+    matchup, count = current_play.get("matchup") or {}, current_play.get("count") or {}
+    score_result = current_play.get("result") or {}
+    about = current_play.get("about") or {}
+    inning = _int_or_none(linescore.get("currentInning"))
+    half = str(linescore.get("inningHalf") or "").upper()
+    if half not in {"TOP", "BOTTOM"} and isinstance(linescore.get("isTopInning"), bool):
+        half = "TOP" if linescore["isTopInning"] else "BOTTOM"
+    outs = _int_or_none(linescore.get("outs"))
+    if outs is None:
+        outs = _int_or_none(count.get("outs"))
+    snapshot = dict(inning=inning, inning_half=half or None, outs=outs,
+                    balls=_int_or_none(count.get("balls")), strikes=_int_or_none(count.get("strikes")),
+                    pitcher_name=_dig(defense, "pitcher", "fullName") or _dig(matchup, "pitcher", "fullName"),
+                    batter_name=_dig(offense, "batter", "fullName") or _dig(matchup, "batter", "fullName"),
+                    runner_on_first=bool(offense.get("first")), runner_on_second=bool(offense.get("second")),
+                    runner_on_third=bool(offense.get("third")))
+    play_inning = _int_or_none(about.get("inning"))
+    play_half = ("TOP" if about["isTopInning"] else "BOTTOM") if isinstance(about.get("isTopInning"), bool) else None
+    play_outs = _int_or_none(count.get("outs"))
+    mismatch = play_inning and play_half and (play_inning, play_half) != (inning, half)
+    if outs != 3 and play_outs != 3 and not mismatch:
+        return snapshot
+
+    # A new currentPlay with its own half, participants and count is stronger
+    # evidence than a lagging linescore showing the previous half's third out.
+    pair = (_dig(matchup, "pitcher", "fullName"), _dig(matchup, "batter", "fullName"))
+    completed = [play for play in all_plays if _dig(play, "about", "isComplete") is True]
+    previous = completed[-1] if completed else {}
+    previous_inning = _int_or_none(_dig(previous, "about", "inning"))
+    previous_top = _dig(previous, "about", "isTopInning")
+    proven_next = (previous_inning is not None and isinstance(previous_top, bool)
+                   and _dig(previous, "count", "outs") == 3
+                   and (play_inning, play_half) ==
+                   (previous_inning + (not previous_top), "BOTTOM" if previous_top else "TOP"))
+    next_from_line = (outs == 3 and inning is not None and half in {"TOP", "BOTTOM"}
+                      and (play_inning, play_half) ==
+                      (inning + (half == "BOTTOM"), "BOTTOM" if half == "TOP" else "TOP"))
+    if play_inning and play_half and play_outs in {0, 1, 2} and all(pair) and (next_from_line or proven_next):
+        snapshot.update(inning=play_inning, inning_half=play_half, outs=play_outs,
+                        pitcher_name=pair[0], batter_name=pair[1])
+        if mismatch or outs == 3:
+            # Never carry the previous offense's runners into a new half.
+            batting_team = away_id if play_half == "TOP" else home_id
+            aligned_offense = (batting_team is not None and _dig(offense, "team", "id") == batting_team
+                               and _dig(offense, "batter", "fullName") == pair[1])
+            for base, field in (("First", "first"), ("Second", "second"), ("Third", "third")):
+                snapshot[f"runner_on_{field}"] = bool(offense.get(field) if aligned_offense else matchup.get(f"postOn{base}"))
+        return snapshot
+
+    if outs == 3 and play_outs != 3:
+        # Same-half incomplete currentPlay cannot justify resetting a third out.
+        # Recover the ended play when available; otherwise hide unverified live
+        # details rather than present a guessed mix of participants/count/bases.
+        if _dig(previous, "count", "outs") != 3:
+            snapshot.update(pitcher_name=None, batter_name=None, balls=None, strikes=None,
+                            runner_on_first=False, runner_on_second=False, runner_on_third=False)
+            return snapshot
+        about, matchup, count = (previous.get("about") or {}, previous.get("matchup") or {}, previous.get("count") or {})
+        play_inning = _int_or_none(about.get("inning"))
+        play_half = ("TOP" if about["isTopInning"] else "BOTTOM") if isinstance(about.get("isTopInning"), bool) else None
+        play_outs = 3
+        pair = (_dig(matchup, "pitcher", "fullName"), _dig(matchup, "batter", "fullName"))
+        score_result = previous.get("result") or {}
+        snapshot.update(balls=_int_or_none(count.get("balls")), strikes=_int_or_none(count.get("strikes")))
+
+    ended_inning, ended_half = play_inning or inning, play_half or half
+    if play_outs == 3 and ended_inning and ended_half in {"TOP", "BOTTOM"}:
+        next_inning = ended_inning + (ended_half == "BOTTOM")
+        next_half = "BOTTOM" if ended_half == "TOP" else "TOP"
+        next_batting_team = home_id if next_half == "BOTTOM" else away_id
+        # Explicit batting-team identity plus both next participants establishes
+        # the new half even when linescore.outs/inningHalf still lag behind.
+        next_pair = (_dig(defense, "pitcher", "fullName"), _dig(offense, "batter", "fullName"))
+        if (next_batting_team is not None and _dig(offense, "team", "id") == next_batting_team
+                and all(next_pair) and all(pair)
+                and next_pair[0] != pair[0] and next_pair[1] != pair[1]
+                and about.get("isComplete") is True):
+            snapshot.update(inning=next_inning, inning_half=next_half, outs=0,
+                            balls=0, strikes=0, pitcher_name=next_pair[0], batter_name=next_pair[1])
+            return snapshot
+
+    # No reliable next-half evidence: retain the ended play's participants,
+    # count, bases and half, not linescore's possibly advanced offense/defense.
+    if not play_inning or not play_half:
+        # Without play-half metadata even the old participant pair cannot be
+        # tied reliably to the displayed half. Do not invent that association.
+        snapshot.update(pitcher_name=None, batter_name=None, balls=None, strikes=None,
+                        runner_on_first=False, runner_on_second=False, runner_on_third=False)
+        return snapshot
+    snapshot.update(inning=ended_inning, inning_half=ended_half or None,
+                    outs=play_outs if play_outs is not None else outs,
+                    pitcher_name=pair[0], batter_name=pair[1])
+    for base, field in (("First", "first"), ("Second", "second"), ("Third", "third")):
+        snapshot[f"runner_on_{field}"] = bool(matchup.get(f"postOn{base}"))
+    for side in ("away", "home"):
+        runs = _int_or_none(score_result.get(f"{side}Score"))
+        if runs is not None:
+            snapshot[f"{side}_runs"] = runs
+    return snapshot
+
+
 def normalize_game(feed: dict[str, Any], schedule: dict[str, Any] | None = None) -> GameSummary:
     schedule = schedule or {}
     game_data = feed.get("gameData") or {}
@@ -432,10 +552,6 @@ def normalize_game(feed: dict[str, Any], schedule: dict[str, Any] | None = None)
     home = _team_values(feed, schedule, "home")
     linescore = live_data.get("linescore") or {}
     current_play = live_data.get("plays", {}).get("currentPlay") or {}
-    matchup = current_play.get("matchup") or {}
-    count = current_play.get("count") or {}
-    offense = linescore.get("offense") or {}
-    defense = linescore.get("defense") or {}
     decisions = live_data.get("decisions") or {}
     winner = decisions.get("winner") or {}
     loser = decisions.get("loser") or {}
@@ -445,9 +561,8 @@ def normalize_game(feed: dict[str, Any], schedule: dict[str, Any] | None = None)
     save_stats = _decision_pitching_stats(live_data, save)
     scheduled_time = _parse_datetime(_dig(game_data, "datetime", "dateTime") or schedule.get("gameDate"))
     season = _int_or_none(_dig(game_data, "game", "season") or schedule.get("season"))
-    inning_half = linescore.get("inningHalf")
-    if not inning_half and linescore.get("currentInning") is not None:
-        inning_half = "Top" if linescore.get("isTopInning") else "Bottom"
+    snapshot = _live_snapshot(linescore, current_play, away[0], home[0],
+                              _dig(live_data, "plays", "allPlays", default=[]))
 
     return GameSummary(
         game_pk=_int_or_none(_dig(game_data, "game", "pk") or schedule.get("gamePk")),
@@ -457,23 +572,16 @@ def normalize_game(feed: dict[str, Any], schedule: dict[str, Any] | None = None)
         is_final=classified.is_final,
         is_pregame=classified.is_pregame,
         away_team_id=away[0], away_team_name=away[1], away_abbreviation=away[2],
-        away_runs=away[3], away_hits=away[4], away_errors=away[5],
+        away_runs=snapshot.pop("away_runs", away[3]), away_hits=away[4], away_errors=away[5],
         away_starting_pitcher=away[6],
         away_starting_pitcher_wins=away[7], away_starting_pitcher_losses=away[8],
         home_team_id=home[0], home_team_name=home[1], home_abbreviation=home[2],
-        home_runs=home[3], home_hits=home[4], home_errors=home[5],
+        home_runs=snapshot.pop("home_runs", home[3]), home_hits=home[4], home_errors=home[5],
         home_starting_pitcher=home[6],
         home_starting_pitcher_wins=home[7], home_starting_pitcher_losses=home[8],
-        inning=_int_or_none(linescore.get("currentInning")),
-        inning_half=str(inning_half).upper() if inning_half else None,
-        outs=_int_or_none(linescore.get("outs") if linescore.get("outs") is not None else count.get("outs")),
-        balls=_int_or_none(count.get("balls")), strikes=_int_or_none(count.get("strikes")),
-        pitcher_name=_dig(defense, "pitcher", "fullName") or _dig(matchup, "pitcher", "fullName"),
-        batter_name=_dig(offense, "batter", "fullName") or _dig(matchup, "batter", "fullName"),
-        runner_on_first=bool(offense.get("first")),
-        runner_on_second=bool(offense.get("second")),
-        runner_on_third=bool(offense.get("third")),
+        **snapshot,
         scheduled_time=scheduled_time,
+        ended_at=_terminal_play_end(live_data) if classified.is_final else None,
         official_date=str(_dig(game_data, "datetime", "officialDate") or schedule.get("officialDate") or "") or None,
         venue=_dig(game_data, "venue", "name") or _dig(schedule, "venue", "name"),
         winning_pitcher=winner.get("fullName"),
