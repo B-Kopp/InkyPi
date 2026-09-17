@@ -937,7 +937,7 @@ def test_final_pitcher_rows_render_records_and_optional_save(state, expected_row
     renderer._text_in_box = record
     renderer.render(preview_states()[state], (800, 480))
     assert len(renderer.last_final_rows) == expected_rows
-    assert expected_result in {text for text, _ in calls}
+    assert any(text.endswith(f" ({expected_result})") for text, _ in calls)
     assert ({"WP:", "LP:", "SV:"} if expected_rows == 3 else {"WP:", "LP:"}) <= {
         text for text, _ in calls
     }
@@ -956,7 +956,7 @@ def test_final_save_with_missing_total_keeps_row_without_placeholder_total():
     assert len(renderer.last_final_rows) == 3
 
 
-def test_long_final_pitcher_name_cannot_overlap_record_column():
+def test_long_final_pitcher_name_preserves_inline_record_without_overflow():
     game = base_game(
         state=GameState.FINAL, status="FINAL", uses_live_layout=False, is_final=True,
         winning_pitcher="A Very Long Compound Baseball Player Name That Must Fit",
@@ -974,8 +974,8 @@ def test_long_final_pitcher_name_cannot_overlap_record_column():
     renderer._text_in_box = record
     renderer.render(presentation(game), (800, 480))
     name_call = next(call for call in calls if call[0].startswith("A."))
-    result_call = next(call for call in calls if call[0] == "14-5")
-    assert name_call[1][2] <= result_call[1][0]
+    assert name_call[0].endswith(" (14-5)")
+    assert not any(call[0] == "14-5" for call in calls)
     assert ImageDraw.Draw(Image.new("RGB", (1, 1))).textlength(
         name_call[0], font=name_call[2]
     ) <= name_call[1][2] - name_call[1][0] - 4

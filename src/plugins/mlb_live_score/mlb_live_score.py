@@ -5,6 +5,9 @@ from __future__ import annotations
 import logging
 import threading
 import time
+from datetime import timezone
+
+import pytz
 
 from plugins.base_plugin.base_plugin import BasePlugin
 
@@ -77,12 +80,34 @@ class MlbLiveScore(BasePlugin):
         selected_trailing = bool(scores_available and selected_score < opponent_score)
         tied = bool(scores_available and selected_score == opponent_score)
         is_live = bool(game and game.uses_live_layout)
+        pregame_soon, recent_final = False, False
+        if game and current_dt is not None and current_dt.tzinfo is not None and current_dt.utcoffset() is not None:
+            local_now = current_dt
+            zone = device_config.get_config("timezone", default=None) if device_config else None
+            if isinstance(zone, str) and zone:
+                local_now = current_dt.astimezone(pytz.timezone(zone))
+            today = local_now.date()
+            today_game = (not presentation.no_game_today and
+                          (not game.official_date or game.official_date == today.isoformat()))
+            now_utc = local_now.astimezone(timezone.utc)
+            start = game.scheduled_time
+            if today_game and game.is_pregame and start and start.tzinfo is not None and start.utcoffset() is not None:
+                seconds_until_start = (start.astimezone(timezone.utc) - now_utc).total_seconds()
+                pregame_soon = (start.astimezone(local_now.tzinfo).date() == today and
+                                0 <= seconds_until_start <= 2 * 60 * 60)
+            end = game.ended_at
+            if today_game and game.is_final and end and end.tzinfo is not None and end.utcoffset() is not None:
+                seconds_since_end = (now_utc - end.astimezone(timezone.utc)).total_seconds()
+                recent_final = (end.astimezone(local_now.tzinfo).date() == today and
+                                0 <= seconds_since_end <= 3 * 60 * 60)
         return {
             "game": {
                 "status": game.state.value if game else "unavailable",
                 "is_live": is_live,
                 "is_pregame": bool(game and game.is_pregame),
                 "is_final": bool(game and game.is_final),
+                "pregame_within_2_hours": pregame_soon,
+                "final_within_3_hours": recent_final,
                 "inning": game.inning if game and not game.is_pregame else None,
                 "inning_half": (
                     game.inning_half.lower()
@@ -114,6 +139,13 @@ class MlbLiveScore(BasePlugin):
             "game.is_live": {"label": "Game is live", "type": "boolean"},
             "game.is_pregame": {"label": "Game is pregame", "type": "boolean"},
             "game.is_final": {"label": "Game is final", "type": "boolean"},
+            "game.pregame_within_2_hours": {
+                "label": "Today's first pitch is within two hours", "type": "boolean",
+            },
+            "game.final_within_3_hours": {
+                "label": "Today's final game ended within three hours", "type": "boolean",
+                "description": "Uses the completed terminal play timestamp; unavailable timestamps do not match.",
+            },
             "game.selected_team": {"label": "Selected team", "type": "string"},
             "game.inning": {"label": "Inning", "type": "number"},
             "game.inning_half": {

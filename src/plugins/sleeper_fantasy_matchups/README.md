@@ -31,6 +31,15 @@ Sleeper does **not** supply matchup win probability. **EST. WIN CHANCE** is calc
 
 For active NFL games, use a refresh interval of approximately **2–5 minutes**.
 
+At the primary 800×480 resolution, secondary text has a centralized 14-pixel
+minimum. Team-name fitting stops at 16 pixels in dense cards (18 in two-card
+layouts), then ellipsizes rather than shrinking further. Records/statuses,
+projections and win-chance labels retain the same hierarchy and 1–4-card layout.
+The lowercase `vs` separator has a protected, clean center strip, without a
+score divider behind or beside its letters. Probability bars are 18/15/14/14px
+high for 1/2/3/4-league layouts, including their border. Sizes scale
+proportionally for other displays.
+
 ## Offline previews
 
 From the repository root:

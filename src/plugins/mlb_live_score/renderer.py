@@ -17,6 +17,9 @@ BLACK = "#101813"
 YELLOW = "#f3c640"
 RED = "#b23a32"
 LEFT_PANEL_RATIO = 0.60
+RUNNER_LABEL_FONT_SIZE = 30  # Readable reference size at 800x480.
+RUNNER_LABEL_LINE_GAP = 6
+RUNNER_LABEL_PADDING = 12
 STANDINGS_COLUMN_PROPORTIONS = (0.40, 0.20, 0.20, 0.20)
 
 FONT_DIR = Path(__file__).resolve().parents[2] / "static" / "fonts"
@@ -150,12 +153,24 @@ def compact_player_name(value: str | None) -> str:
     return f"{parts[0][0]}. {' '.join(parts[1:])}"
 
 
+def base_runner_description(game: GameSummary) -> str:
+    occupied = [label for label, present in (("1ST", game.runner_on_first),
+                ("2ND", game.runner_on_second), ("3RD", game.runner_on_third)) if present]
+    if not occupied:
+        return "NO ONE ON BASE"
+    if len(occupied) == 3:
+        return "BASES LOADED"
+    return ("RUNNER ON " if len(occupied) == 1 else "RUNNERS ON ") + " AND ".join(occupied)
+
+
 class ScoreboardRenderer:
     def __init__(self):
         self.last_layout: LayoutBounds | None = None
         self.typography = TypographyScale.for_canvas(800, 480)
         self.last_scoreboard_columns: tuple[int, int, int, int, int] | None = None
         self.last_diamond_bounds: tuple[int, int, int, int] | None = None
+        self.runner_label_size = RUNNER_LABEL_FONT_SIZE
+        self.last_runner_label_lines = []
         self.last_final_rows: list[tuple[int, int, int, int]] = []
         self.last_starter_rows: list[tuple[int, int, int, int]] = []
         self.last_standings_columns: tuple[int, int, int, int, int] | None = None
@@ -175,6 +190,8 @@ class ScoreboardRenderer:
         self.typography = TypographyScale.for_canvas(width, height)
         self.last_scoreboard_columns = None
         self.last_diamond_bounds = None
+        self.runner_label_size = max(8, round(RUNNER_LABEL_FONT_SIZE * min(width / 800, height / 480)))
+        self.last_runner_label_lines = []
         self.last_final_rows = []
         self.last_starter_rows = []
         self.last_standings_columns = None
@@ -404,31 +421,7 @@ class ScoreboardRenderer:
         return f"{wins}-{losses}" if wins is not None and losses is not None else ""
 
     def _postgame_line(self, draw, label, name, result, box):
-        x0, y0, x1, y1 = box
-        width = x1 - x0
-        label_end = x0 + round(width * 0.13)
-        result_start = x1 - round(width * 0.22)
-        label_font = _font(self.typography.label, bold=True, pixel=True)
-        value_font = _font(self.typography.player_primary, bold=True)
-        self._text_in_box(draw, label, (x0, y0, label_end, y1), label_font, align="left")
-        fitted_name, fitted_font = fit_text(
-            draw, compact_player_name(name), result_start - label_end - 8,
-            self.typography.player_primary,
-            min_size=max(10, self.typography.player_primary - 7), bold=True,
-        )
-        self._text_in_box(
-            draw, fitted_name, (label_end, y0, result_start, y1),
-            fitted_font, align="left", padding=2,
-        )
-        if result:
-            fitted_result, result_font = fit_text(
-                draw, result, x1 - result_start, self.typography.player_primary,
-                min_size=max(10, self.typography.player_primary - 5), bold=True,
-            )
-            self._text_in_box(
-                draw, fitted_result, (result_start, y0, x1, y1),
-                result_font, align="right",
-            )
+        self._pitcher_line(draw, label, name, result, box, round((box[2] - box[0]) * 0.13))
         self.last_final_rows.append(box)
 
     def _draw_no_game(self, draw, panel, presentation):
@@ -489,15 +482,42 @@ class ScoreboardRenderer:
         )
         return details
 
+    def _draw_runner_status_label(self, draw, panel, game):
+        """Try readable single-line text, then deliberate phrase-boundary wraps."""
+        x0, y0, x1, y1 = panel
+        label = base_runner_description(game)
+        font = _font(self.runner_label_size, bold=True)
+        lines = [label]
+        if _text_width(draw, label, font) > x1 - x0:
+            if label.startswith("RUNNERS ON "):
+                lines = ["RUNNERS ON", label[len("RUNNERS ON "):]]
+            elif label.startswith("RUNNER ON "):
+                lines = ["RUNNER ON", label[len("RUNNER ON "):]]
+            else:
+                lines = {"NO ONE ON BASE": ["NO ONE", "ON BASE"],
+                         "BASES LOADED": ["BASES", "LOADED"]}[label]
+        # Only narrow alternate canvases can require fitting after wrapping.
+        while font.size > 8 and any(_text_width(draw, line, font) > x1 - x0 for line in lines):
+            font = _font(font.size - 1, bold=True)
+        scale = self.runner_label_size / RUNNER_LABEL_FONT_SIZE
+        gap = max(2, round(RUNNER_LABEL_LINE_GAP * scale))
+        padding = max(3, round(RUNNER_LABEL_PADDING * scale))
+        heights = [draw.textbbox((0, 0), line, font=font)[3] - draw.textbbox((0, 0), line, font=font)[1] for line in lines]
+        text_height = sum(heights) + gap * (len(lines) - 1)
+        title_height = max(round((y1 - y0) * .12), text_height + 2 * padding)
+        top = y0 + (title_height - text_height) // 2
+        for line, height in zip(lines, heights):
+            box = (x0, top, x1, top + height)
+            self._text_in_box(draw, line, box, font)
+            self.last_runner_label_lines.append((line, box, font.size))
+            top += height + gap
+        return y0 + title_height
+
     def _draw_diamond(self, draw, panel, game):
         x0, y0, x1, y1 = panel
         width, height = x1 - x0, y1 - y0
-        title_h = round(height * 0.12)
-        title_font = _font(self.typography.panel_title, bold=True, pixel=True)
-        title = "ON BASE"
-        self._text_in_box(draw, title, (x0, y0, x1, y0 + title_h), title_font)
+        play_top = self._draw_runner_status_label(draw, panel, game)
         cx = (x0 + x1) // 2
-        play_top = y0 + title_h
         cy = play_top + round((y1 - play_top) * 0.49)
         base_size = max(12, round(min(width * 0.105, height * 0.08)))
         radius = min(
@@ -597,7 +617,11 @@ class ScoreboardRenderer:
         return boundaries
 
     def _starter_line(self, draw, label, name, record, box, label_w):
-        """Render a starter with its optional record immediately after its name."""
+        self._pitcher_line(draw, label, name, record, box, label_w)
+        self.last_starter_rows.append(box)
+
+    def _pitcher_line(self, draw, label, name, record, box, label_w):
+        """Render any pitcher with its optional parenthesized record inline."""
         x0, y0, x1, y1 = box
         label_end = x0 + label_w
         label_font = _font(self.typography.label, bold=True, pixel=True)
@@ -624,7 +648,6 @@ class ScoreboardRenderer:
             draw, fitted_text, (label_end, y0, x1, y1),
             player_font, align="left", padding=6,
         )
-        self.last_starter_rows.append(box)
 
     def _labeled_line(self, draw, label, value, x0, y, x1, line_h, label_w, value_fill=CREAM):
         label_font = _font(self.typography.label, bold=True, pixel=True)
